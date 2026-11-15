@@ -308,7 +308,7 @@ export function makeCard(history: readonly HistoryItem[], need: RelayNeed, text:
 /** Prompt tags inside card text would read as protocol to the model: drop them. */
 const PROTOCOL_TAG = /<\/?(?:think|tool_call|tool_response)(?:\s[^>]*)?>/gi
 
-const THINK_END = '<｜end▁of▁thinking｜>'
+const THINK_END = '</think>'
 
 /**
  * The model's recap output as card text: no leading think block (an unclosed

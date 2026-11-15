@@ -38,7 +38,7 @@ const tools = buildCatalog([
   { name: 'write', description: '', parameters: {} },
 ], { mode: 'mapped' })
 
-const THINK_END = '<｜end▁of▁thinking｜>'
+const THINK_END = '</think>'
 /** A recap generation as the thinking wire shows it: withheld opener, then the card. */
 const recapOutput = (text: string) => `>I will summarise the work so far.${THINK_END}${text}`
 
@@ -155,6 +155,9 @@ test('relay: the duplicate gate restarts at the leg; steps still count from the 
 
 test('relay: card text drops a think block and refuses protocol garbage', () => {
   assert.equal(cleanCardText(`<think>I read the file.${THINK_END}1. Objective: x`), '1. Objective: x')
+  // The wire tag the model actually writes: pin the literal, not only the constant,
+  // or a wrong THINK_END silently turns every card into the deterministic fallback.
+  assert.equal(cleanCardText('<think>I read the file.</think>1. Objective: x'), '1. Objective: x')
   assert.equal(cleanCardText('<think>unfinished'), '')
   assert.equal(cleanCardText('<tool_call>{"name":"read_file"}</tool_call>'), '')
   assert.equal(cleanCardText('1. Objective: keep <tool_response> out'), '1. Objective: keep  out')
@@ -249,4 +252,45 @@ test('relay: a card that fell back to the summary is marked as such in the trace
   assert.equal(card.outcome, 'card-empty')
   assert.equal(card.relay?.fallback, true)
   assert.ok((card.relay?.card.length ?? 0) > 0, 'the summary the model will read is recorded')
+})
+
+test('relay: a card that hits the output cap after its think continues once', async () => {
+  class CardLengthGenerator implements Generator {
+    readonly prompts: string[] = []
+    private calls = 0
+    generate(request: GenerateRequest): Promise<GenerateResult> {
+      this.prompts.push(request.prompt)
+      this.calls++
+      if (this.calls === 1) {
+        return Promise.resolve({ text: `>Plan.${THINK_END}1. Objective: x\n2. Facts: partial`, finish: 'length', completionTokens: 256 })
+      }
+      if (this.calls === 2) {
+        return Promise.resolve({ text: ' and complete.\n6. Remaining plan: done.', finish: 'stop', completionTokens: 20 })
+      }
+      return Promise.resolve({ text: `>Answer.${THINK_END}Done.`, finish: 'stop', completionTokens: 10 })
+    }
+  }
+  const generator = new CardLengthGenerator()
+  const saved: RelayCard[] = []
+  const budget = itemTokens(turnOne.slice(0, 6))
+  await decideStep({
+    history: turnOne,
+    tools,
+    config: { ...DEFAULT_HARNESS, maxSteps: 5, relay: { budgetTokens: budget, cardMaxTokens: 256 } },
+    generator,
+    relay: { cards: [], save: card => saved.push(card) },
+  })
+  assert.equal(saved.length, 1)
+  assert.match(saved[0]!.text, /partial and complete\./)
+  assert.match(saved[0]!.text, /6\. Remaining plan: done\./)
+})
+
+test('relay: the forced closeout drops the "call another tool" reminder', async () => {
+  const generator = new ScriptedGenerator([`>Done.${THINK_END}Answered.`])
+  const config: HarnessConfig = { ...DEFAULT_HARNESS, maxSteps: 4 }
+  const step = await decideStep({ history: turnOne, tools, config, generator })
+  assert.equal(step.decision.type, 'final')
+  const prompt = generator.prompts[0]!
+  assert.doesNotMatch(prompt, /Call another tool only for a specific missing fact/)
+  assert.ok(prompt.endsWith('If they are insufficient, say what could not be verified.\n\nAssistant: <think'))
 })

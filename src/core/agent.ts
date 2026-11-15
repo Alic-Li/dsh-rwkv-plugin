@@ -232,6 +232,8 @@ class ThinkSplitter {
 const MAX_THINK_STOP_RESUMES = 4
 /** Extra tokens after force-closing a think that ran out of budget. */
 const THINK_CLOSE_TOKENS = 1024
+/** Extra tokens to finish a handoff card body that hit cardMaxTokens mid-sentence. */
+const CARD_FINISH_TOKENS = 384
 
 function describe(action: Action): string {
   switch (action.type) {
@@ -310,6 +312,15 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       const next = await input.generator.generate({ ...request, prompt: prompt + closed, maxTokens: THINK_CLOSE_TOKENS }, onDelta)
       generations++
       text = closed + next.text
+      spent += next.completionTokens ?? countTokens(next.text)
+      result = { ...next, text }
+    }
+    // A card cut off after its think block is a failed parse: continue once so
+    // the recap the model already started reaches a usable end.
+    if (stage === 'card' && config.guards && result.finish === 'length' && (!opening || !thinkOpen(opening + text))) {
+      const next = await input.generator.generate({ ...request, prompt: prompt + text, maxTokens: CARD_FINISH_TOKENS }, onDelta)
+      generations++
+      text += next.text
       spent += next.completionTokens ?? countTokens(next.text)
       result = { ...next, text }
     }
@@ -400,7 +411,9 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
    */
   const answerStage = async (entries: readonly Entry[], prelude: readonly string[], allowTools = false): Promise<StepResult> => {
     const staged: Entry[] = [
-      ...entries,
+      // The per-step "call another tool" reminder contradicts the closeout
+      // ("tools are now unavailable"); drop it before the final instruction.
+      ...entries.filter(entry => !(entry.role === 'user' && entry.text === reminder)),
       ...prelude.map(text => ({ role: 'user' as const, text })),
       { role: 'user', text: oneStageAnswerInstruction() },
     ]
