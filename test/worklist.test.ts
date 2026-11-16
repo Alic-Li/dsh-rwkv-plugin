@@ -9,6 +9,7 @@ import {
   applyTodoUpdate,
   foldWorklist,
   formatWorklist,
+  projectNativeTodos,
   TODO_PLAN_TOOL,
   TODO_UPDATE_TOOL,
   WORKLIST_CHECKPOINT_NUDGE,
@@ -342,4 +343,39 @@ test('worklist: clears stale reasoning on discontinuous pinned firstPlan and pre
   ]
   const hardFold = foldWorklist(overflowTurn, { systemTokens: 500, budgetTokens: 1500, hardCapTokens: 2500 })
   assert.ok(hardFold.items.some(item => item.kind === 'note' && item.text.includes('- read /app/svc.py -> ok')), 'hardCap overflow inserts deterministic step ledger')
+})
+
+test('worklist UI: advancing to next in_progress auto-completes noted item and TodoPanel projection stays clean and settles on turn/end', () => {
+  const initial = applyTodoPlan([], ['Inspect todo.ts', 'Inspect worklist.ts', 'Run tests'])
+  assert.ok(Array.isArray(initial))
+
+  // Item #1 checkpoints with in_progress + note, then model jumps to #2 in_progress -> #1 auto-completes instead of turning gray pending!
+  const step1 = applyTodoUpdate(initial, { id: 1, status: 'in_progress', note: 'src/todo.ts: L40 STATE_RECORD' })
+  assert.equal(typeof step1, 'object')
+  if (typeof step1 === 'string') throw new Error(step1)
+  const step2 = applyTodoUpdate(step1.items, { id: 2, status: 'in_progress', note: 'src/core/worklist.ts: L448' })
+  assert.equal(typeof step2, 'object')
+  if (typeof step2 === 'string') throw new Error(step2)
+  assert.equal(step2.items[0]!.status, 'completed', 'earlier noted item auto-completes when advancing to #2')
+  assert.equal(step2.items[1]!.status, 'in_progress')
+
+  // Unnoted active item still demotes back to pending if focus switches before any note is written.
+  const unnotedSwitch = applyTodoUpdate(initial, { id: 2, status: 'in_progress' })
+  assert.equal(typeof unnotedSwitch, 'object')
+  if (typeof unnotedSwitch === 'string') throw new Error(unnotedSwitch)
+  assert.equal(unnotedSwitch.items[0]!.status, 'pending')
+
+  // Native TodoPanel projection omits verbose note tails during the turn and settles in_progress -> pending on turn/end.
+  const liveProj = projectNativeTodos(step2.items)
+  assert.deepEqual(liveProj, [
+    { content: '[1] Inspect todo.ts', status: 'completed' },
+    { content: '[2] Inspect worklist.ts', status: 'in_progress' },
+    { content: '[3] Run tests', status: 'pending' },
+  ])
+  const settledProj = projectNativeTodos(step2.items, { turnEnded: true })
+  assert.deepEqual(settledProj, [
+    { content: '[1] Inspect todo.ts', status: 'completed' },
+    { content: '[2] Inspect worklist.ts', status: 'pending' },
+    { content: '[3] Run tests', status: 'pending' },
+  ])
 })

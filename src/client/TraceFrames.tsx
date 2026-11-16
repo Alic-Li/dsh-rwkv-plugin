@@ -97,10 +97,11 @@ function thinkOf(output: string): string {
   return text.slice(text.indexOf('>') + 1, end < 0 ? undefined : end).trim()
 }
 
-/** The cut a handoff card or stateful worklist checkpoint makes. */
-function CutNote(props: { record: TraceRecord }) {
+/** The cut a handoff card or stateful worklist checkpoint makes on THIS step. */
+function CutNote(props: { record: TraceRecord; worklistFold?: { fromTokens?: number; toTokens: number } | undefined }) {
   const relay = props.record.relay
   const wl = props.record.worklist
+  const fold = props.worklistFold
   return (
     <>
       {relay !== undefined ? (
@@ -108,9 +109,12 @@ function CutNote(props: { record: TraceRecord }) {
           ✂ 压缩 {relay.to - relay.from} 条历史 · 第 {relay.turn} 轮
         </span>
       ) : null}
-      {wl !== undefined && wl.checkpointAt !== undefined ? (
-        <span className="rl-cut" title={`状态化工单已折叠早期探索步骤（检查点 #${wl.checkpointAt}，当前提示词约 ${wl.promptTokens}/${wl.budgetTokens} token）`}>
-          ✂ 工单已折叠 · {wl.promptTokens} tok
+      {fold !== undefined ? (
+        <span
+          className="rl-cut"
+          title={`上一步写入工单 note 后，本步折叠了早期探索输出（提示词 ${fold.fromTokens !== undefined ? `${fold.fromTokens} → ` : ''}${fold.toTokens} token）`}
+        >
+          ✂ 本步折叠 · {fold.fromTokens !== undefined ? `${fold.fromTokens}→${fold.toTokens}` : fold.toTokens} tok
         </span>
       ) : null}
       {wl !== undefined && wl.nudged ? (
@@ -168,6 +172,7 @@ interface Row {
   readonly request: number
   readonly generation: number
   readonly first: boolean
+  readonly worklistFold?: { readonly fromTokens?: number; readonly toTokens: number } | undefined
 }
 
 function time(at: string | undefined): string {
@@ -242,7 +247,11 @@ function Inspector(props: { session: string; row: Row; step: TraceRecord | undef
               {record.worklist ? (
                 <KeyValue label="状态化工单">
                   提示词 {record.worklist.promptTokens} / {record.worklist.budgetTokens} token
-                  {record.worklist.checkpointAt !== undefined ? ` · 已折叠（检查点 #${record.worklist.checkpointAt}）` : ''}
+                  {row.worklistFold !== undefined
+                    ? ` · 本步刚执行折叠（${row.worklistFold.fromTokens !== undefined ? `${row.worklistFold.fromTokens} → ` : ''}${row.worklistFold.toTokens} token，检查点 #${record.worklist.checkpointAt}）`
+                    : record.worklist.checkpointAt !== undefined
+                      ? ` · 沿用已折叠窗口（检查点 #${record.worklist.checkpointAt}）`
+                      : ''}
                   {record.worklist.nudged ? ' · 本步触发不撤回预算提醒' : ''}
                 </KeyValue>
               ) : null}
@@ -294,6 +303,8 @@ export function TraceFrames(props: { session: string; records: readonly TraceRec
   const steps = new Map<number, TraceRecord>()
   let request = 1
   let generation = 0
+  let lastCheckpointAt: number | undefined
+  let lastPromptTokens: number | undefined
   props.records.forEach((record, index) => {
     if (!props.showSide && record.purpose !== undefined) return
     if (record.stage === 'step') {
@@ -307,7 +318,19 @@ export function TraceFrames(props: { session: string; records: readonly TraceRec
     // same request and is the reason that decision sees less history.
     if (!isGeneration(record) && !isCard(record)) return
     generation++
-    rows.push({ index, record, request, generation, first: generation === 1 })
+    let worklistFold: { fromTokens?: number; toTokens: number } | undefined
+    if (record.purpose === undefined && generation === 1 && record.worklist !== undefined) {
+      const cp = record.worklist.checkpointAt
+      if (cp !== undefined && cp !== lastCheckpointAt) {
+        worklistFold = {
+          ...(lastPromptTokens !== undefined ? { fromTokens: lastPromptTokens } : {}),
+          toTokens: record.worklist.promptTokens,
+        }
+      }
+      lastCheckpointAt = cp
+      lastPromptTokens = record.worklist.promptTokens
+    }
+    rows.push({ index, record, request, generation, first: generation === 1, worklistFold })
   })
   const visible = props.onlyTouched ? rows.filter(row => row.record.stage !== 'step' && touched(row.record)) : rows
   const current = rows.find(row => row.index === selected)
@@ -347,7 +370,7 @@ export function TraceFrames(props: { session: string; records: readonly TraceRec
                 <td className="rl-content">
                   <span className="rl-content-inner">
                     {row.record.stage === 'answer' ? <span className="rl-chip rl-chip-muted">收尾阶段</span> : null}
-                    <CutNote record={row.record} />
+                    <CutNote record={row.record} worklistFold={row.worklistFold} />
                     {row.record.finish === 'length' ? <span className="rl-chip rl-chip-warn">写满上限</span> : null}
                     <Preview record={row.record} />
                     {repairs.map(repair => <span key={repair} className="rl-chip rl-chip-warn" title={repair}>{REPAIR_LABEL[repair] ?? repair}</span>)}

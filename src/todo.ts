@@ -25,6 +25,7 @@ import {
   formatWorklist,
   isWorklistTool,
   normalizeWorklistStatus,
+  projectNativeTodos,
   TODO_PLAN_TOOL,
   TODO_UPDATE_TOOL,
   type WorklistItem,
@@ -61,12 +62,15 @@ interface ExecLike {
 
 interface ContextLike {
   readonly tools: { register(definition: unknown): () => void }
+  on?(event: string, listener: (session: SessionLike, ev: SessionEventLike) => void): () => void
 }
 
 const appendRecord = appendPluginRecord as unknown as (session: object, type: string, data: unknown) => unknown
 const recordOf = pluginRecordOf as unknown as (event: unknown) => { type: string; data: unknown } | undefined
 
 const VALID_STATUSES = new Set<string>(['pending', 'in_progress', 'completed', 'dropped'])
+
+export { projectNativeTodos }
 
 function decodeItems(raw: unknown): WorklistItem[] | undefined {
   if (!Array.isArray(raw)) return undefined
@@ -187,24 +191,44 @@ class WorklistStore {
       // Outside a live DSH session store (unit tests): keep in memory.
     }
     // Mirror onto DSH's native `todo/write` projection so the Desktop TodoPanel
-    // renders progress live. Prefixing `[id]` guarantees unique non-empty content.
+    // renders clean single-line checklist titles (`[id] title`, without stuffing
+    // multi-line technical notes into the compact dock row).
     try {
-      const todos = items.map(item => ({
-        content: item.status === 'dropped'
-          ? `[${item.id}] [dropped] ${item.content}${item.note ? ` — ${item.note}` : ''}`
-          : `[${item.id}] ${item.content}${item.note ? ` — ${item.note}` : ''}`,
-        status: (item.status === 'dropped' ? 'completed' : item.status) as 'pending' | 'in_progress' | 'completed',
-      }))
-      session.append?.('todo/write', { todos })
+      session.append?.('todo/write', { todos: projectNativeTodos(items) })
     } catch {
       // Ignore if session does not accept todo/write in minimal test harnesses.
     }
   }
+
+  /**
+   * Settle any lingering `in_progress` indicator in the Desktop `TodoPanel` once
+   * `turn/end` commits so an unfinished item does not keep spinning while idle.
+   */
+  settleTurnEnd(session: SessionLike | undefined): void {
+    if (session === undefined) return
+    const { items } = this.get(session)
+    if (!items.some(item => item.status === 'in_progress')) return
+    try {
+      session.append?.('todo/write', { todos: projectNativeTodos(items, { turnEnded: true }) })
+    } catch {
+      // Ignore if session rejects post-turn UI projection append.
+    }
+  }
+}
+
+const STATUS_CN: Record<string, string> = {
+  completed: '已完成',
+  in_progress: '记录进展',
+  dropped: '已跳过',
 }
 
 export function apply(ctx: Context): void {
   const host = ctx as unknown as ContextLike
   const store = new WorklistStore()
+
+  host.on?.('session/event', (session, ev) => {
+    if (ev?.type === 'turn/end') store.settleTurnEnd(session)
+  })
 
   host.tools.register(defineTool({
     name: TODO_PLAN_TOOL,
@@ -237,7 +261,7 @@ export function apply(ctx: Context): void {
     },
     presentCall: (args: { items?: unknown }) => ({
       card: 'generic',
-      title: 'Plan work list',
+      title: `规划工单（${Array.isArray(args.items) ? args.items.length : 0} 项）`,
       kind: 'other',
       rawInput: args.items,
     }),
@@ -291,11 +315,14 @@ export function apply(ctx: Context): void {
       store.save(session, current.turn, updated.items, statusNorm === 'completed')
       return Promise.resolve({ summary: formatWorklist(updated.items) })
     },
-    presentCall: (args: Record<string, unknown>) => ({
-      card: 'generic',
-      title: `Update todo #${String(args.id ?? '?')}`,
-      kind: 'other',
-      rawInput: args,
-    }),
+    presentCall: (args: Record<string, unknown>) => {
+      const st = typeof args.status === 'string' ? (STATUS_CN[args.status] ?? args.status) : '更新'
+      return {
+        card: 'generic',
+        title: `更新工单 #${String(args.id ?? '?')} · ${st}`,
+        kind: 'other',
+        rawInput: args,
+      }
+    },
   } as never))
 }

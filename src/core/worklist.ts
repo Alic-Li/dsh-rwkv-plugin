@@ -193,9 +193,11 @@ export function applyTodoUpdate(
         ...effectiveNote ? { note: effectiveNote } : {},
       }
     }
-    // Single-active discipline: focusing this item demotes another active item back to pending.
+    // Single-active discipline: focusing a later item auto-completes an earlier
+    // active item that already recorded a note, and demotes an unnoted/later one.
     if (status === 'in_progress' && item.status === 'in_progress') {
-      return { ...item, status: 'pending' }
+      const autoDone = index < rawId - 1 && Boolean(item.note && item.note.trim() !== '')
+      return { ...item, status: autoDone ? 'completed' : 'pending' }
     }
     return item
   })
@@ -220,6 +222,26 @@ export function formatWorklist(items: readonly WorklistItem[]): string {
     if (item.note) lines.push(`  note: ${item.note}`)
   }
   return lines.join('\n')
+}
+
+/**
+ * Clean single-line projection mirrored onto DSH's native `todo/write` event for
+ * the Desktop `TodoPanel` dock (omits long technical notes, and settles lingering
+ * `in_progress` spinners to `pending` once `turn/end` fires).
+ */
+export function projectNativeTodos(
+  items: readonly WorklistItem[],
+  options?: { readonly turnEnded?: boolean },
+): { content: string; status: 'pending' | 'in_progress' | 'completed' }[] {
+  const settleActive = options?.turnEnded === true
+  return items.map(item => ({
+    content: item.status === 'dropped'
+      ? `[${item.id}] [已跳过] ${item.content}`
+      : `[${item.id}] ${item.content}`,
+    status: item.status === 'dropped'
+      ? 'completed'
+      : (settleActive && item.status === 'in_progress' ? 'pending' : item.status),
+  }))
 }
 
 /** Rendering of one HistoryItem as prompt bytes, for exact RWKV token counting. */
