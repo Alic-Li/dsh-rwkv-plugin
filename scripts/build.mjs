@@ -40,8 +40,12 @@ const only = process.argv[2]
 
 if (only !== 'client') {
   await esbuild.build({
-    // index: the provider; line-edit: the edit_lines tool plugin (mounted separately).
-    entryPoints: { index: join(root, 'src/index.ts'), 'line-edit': join(root, 'src/line-edit.ts') },
+    // index: the provider; line-edit / todo: tool plugins (mounted separately).
+    entryPoints: {
+      index: join(root, 'src/index.ts'),
+      'line-edit': join(root, 'src/line-edit.ts'),
+      todo: join(root, 'src/todo.ts'),
+    },
     outdir: join(root, 'lib'),
     bundle: true,
     format: 'esm',

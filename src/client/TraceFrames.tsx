@@ -97,15 +97,28 @@ function thinkOf(output: string): string {
   return text.slice(text.indexOf('>') + 1, end < 0 ? undefined : end).trim()
 }
 
-/** The cut a handoff card makes: which part of the conversation stops being readable. */
+/** The cut a handoff card or stateful worklist checkpoint makes. */
 function CutNote(props: { record: TraceRecord }) {
   const relay = props.record.relay
-  if (relay === undefined) return null
-  const count = relay.to - relay.from
+  const wl = props.record.worklist
   return (
-    <span className="rl-cut" title={`第 ${relay.from}–${relay.to - 1} 条历史（用户第 ${relay.turn} 轮，共 ${count} 条）被这张卡替换；此前的调用与结果不再逐条可见`}>
-      ✂ 压缩 {count} 条历史 · 第 {relay.turn} 轮
-    </span>
+    <>
+      {relay !== undefined ? (
+        <span className="rl-cut" title={`第 ${relay.from}–${relay.to - 1} 条历史（用户第 ${relay.turn} 轮，共 ${relay.to - relay.from} 条）被这张卡替换；此前的调用与结果不再逐条可见`}>
+          ✂ 压缩 {relay.to - relay.from} 条历史 · 第 {relay.turn} 轮
+        </span>
+      ) : null}
+      {wl !== undefined && wl.checkpointAt !== undefined ? (
+        <span className="rl-cut" title={`状态化工单已折叠早期探索步骤（检查点 #${wl.checkpointAt}，当前提示词约 ${wl.promptTokens}/${wl.budgetTokens} token）`}>
+          ✂ 工单已折叠 · {wl.promptTokens} tok
+        </span>
+      ) : null}
+      {wl !== undefined && wl.nudged ? (
+        <span className="rl-chip rl-chip-warn" title={`当前提示词 ${wl.promptTokens} token 超过工单预算 ${wl.budgetTokens} token，已追加不撤回预算提醒`}>
+          预算提醒
+        </span>
+      ) : null}
+    </>
   )
 }
 
@@ -225,6 +238,13 @@ function Inspector(props: { session: string; row: Row; step: TraceRecord | undef
               ) : null}
               {step && (step.outputRepairs === false || step.guards === false) ? (
                 <KeyValue label="开关">{step.outputRepairs === false ? '修正模型输出：关 ' : ''}{step.guards === false ? '插件修复：关' : ''}</KeyValue>
+              ) : null}
+              {record.worklist ? (
+                <KeyValue label="状态化工单">
+                  提示词 {record.worklist.promptTokens} / {record.worklist.budgetTokens} token
+                  {record.worklist.checkpointAt !== undefined ? ` · 已折叠（检查点 #${record.worklist.checkpointAt}）` : ''}
+                  {record.worklist.nudged ? ' · 本步触发不撤回预算提醒' : ''}
+                </KeyValue>
               ) : null}
               <KeyValue label="模型">{record.model ?? '—'}</KeyValue>
               {record.purpose ? <KeyValue label="用途">{record.purpose}</KeyValue> : null}

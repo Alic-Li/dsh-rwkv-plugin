@@ -6,6 +6,76 @@
 // arguments it was trained on (agent-tool-v3), and each call is translated back
 // to the DSH tool before DSH executes it.
 
+export const TODO_PLAN_TOOL = 'todo_plan'
+export const TODO_UPDATE_TOOL = 'todo_update'
+
+export const TODO_PLAN_DESCRIPTION =
+  'Create or revise the ordered work list for multi-step tasks (touching multiple methods/files, code + docs/tests, or 3+ distinct subgoals). '
+  + 'Skip this tool for casual chat, quick single-goal lookups (1-3 reads or searches), or a trivial one-spot edit. '
+  + 'For multi-step changes, you may inspect 1-2 files first to understand the layout, then call todo_plan BEFORE making your first file edit — do not wait until after editing to plan. '
+  + 'Calling todo_plan mid-turn keeps completed/dropped items and their notes intact and replaces only unfinished items.'
+
+export const TODO_UPDATE_DESCRIPTION =
+  'Update one item in the current work list by id. '
+  + 'As soon as an item is finished, mark it completed with a concise factual note (<= 120 words: exact /app/... file paths, updated line ranges, signatures, and test exit codes — never mark unexecuted work completed). '
+  + 'Older exploratory tool outputs before the recent workspace actions are folded once note is saved, while your initial todo_plan and the latest workspace results stay visible. '
+  + 'The next pending item becomes in_progress automatically; you may also checkpoint an in_progress item with an interim note before context fills up.'
+
+export const WORKLIST_TOOLS: ReadonlySet<string> = new Set([TODO_PLAN_TOOL, TODO_UPDATE_TOOL])
+
+export function isWorklistTool(name: string): boolean {
+  return WORKLIST_TOOLS.has(name)
+}
+
+export type WorklistStatus = 'pending' | 'in_progress' | 'completed' | 'dropped'
+
+const WORKLIST_PROTOCOL_TAG = /<\/?(?:think|tool_call|tool_response)(?:\s[^>]*)?>/gi
+const WORKLIST_LEADING_BULLET = /^\s*(?:\[\d+\]|\d+[.)]|[-*•])\s*/
+
+export function sanitizeWorklistField(text: string): string {
+  return text.replace(WORKLIST_PROTOCOL_TAG, '').replace(/\s*\n+\s*/g, ' | ').trim()
+}
+
+export function parsePlanItems(raw: unknown): string[] | undefined {
+  if (Array.isArray(raw)) {
+    const out: string[] = []
+    for (const entry of raw) {
+      if (typeof entry === 'string') {
+        const cleaned = sanitizeWorklistField(entry.replace(WORKLIST_LEADING_BULLET, ''))
+        if (cleaned !== '') out.push(cleaned)
+      } else if (typeof entry === 'object' && entry !== null) {
+        const obj = entry as Record<string, unknown>
+        const candidate = obj.content ?? obj.title ?? obj.text ?? obj.step
+        if (typeof candidate === 'string') {
+          const cleaned = sanitizeWorklistField(candidate.replace(WORKLIST_LEADING_BULLET, ''))
+          if (cleaned !== '') out.push(cleaned)
+        }
+      } else {
+        return undefined
+      }
+    }
+    return out
+  }
+  if (typeof raw === 'string') {
+    const lines = raw
+      .split(/\r?\n/)
+      .map(line => sanitizeWorklistField(line.replace(WORKLIST_LEADING_BULLET, '')))
+      .filter(line => line !== '')
+    return lines.length > 0 ? lines : undefined
+  }
+  return undefined
+}
+
+export function normalizeWorklistStatus(raw: unknown): WorklistStatus | undefined {
+  if (typeof raw !== 'string') return undefined
+  const lower = raw.trim().toLowerCase()
+  if (lower === 'pending' || lower === 'todo' || lower === 'not_started') return 'pending'
+  if (lower === 'in_progress' || lower === 'in-progress' || lower === 'doing' || lower === 'active') return 'in_progress'
+  if (lower === 'completed' || lower === 'complete' || lower === 'done' || lower === 'finished') return 'completed'
+  if (lower === 'dropped' || lower === 'cancelled' || lower === 'canceled' || lower === 'skipped') return 'dropped'
+  return undefined
+}
+
 export interface DshToolSchema {
   readonly name: string
   readonly description: string
@@ -167,6 +237,40 @@ export const BUILTIN_MAPPINGS: Readonly<Record<string, ToolMapping>> = {
     },
     fromDsh: args => ({ url: args.url }),
   },
+  // Stateful work list (src/todo.ts); offered when historyMode === 'worklist'.
+  [TODO_PLAN_TOOL]: {
+    wireName: TODO_PLAN_TOOL,
+    description: TODO_PLAN_DESCRIPTION,
+    arguments: '{"items":"array of string"}',
+    schema: { properties: { items: { type: 'array', items: { type: 'string' } } } },
+    toDsh: args => ({ items: parsePlanItems(args.items) ?? args.items }),
+    fromDsh: args => ({ items: args.items }),
+  },
+  [TODO_UPDATE_TOOL]: {
+    wireName: TODO_UPDATE_TOOL,
+    description: TODO_UPDATE_DESCRIPTION,
+    arguments: '{"id":"integer","status":"in_progress|completed|dropped","note":"optional Concrete findings, exact file paths/lines, applied edits, or test outcomes","content":"optional Refined title for this item if the initial wording was inaccurate"}',
+    schema: {
+      properties: {
+        id: { type: 'integer' },
+        status: { type: 'string', enum: ['in_progress', 'completed', 'dropped'] },
+        note: { type: 'string' },
+        content: { type: 'string' },
+      },
+    },
+    toDsh: args => stripUndefined({
+      id: int(typeof args.id === 'string' ? Number(args.id.trim()) : args.id) ?? args.id,
+      status: normalizeWorklistStatus(args.status) ?? args.status,
+      note: str(args.note),
+      content: str(args.content),
+    }),
+    fromDsh: args => stripUndefined({
+      id: args.id,
+      status: args.status,
+      note: args.note,
+      content: args.content,
+    }),
+  },
 }
 
 /**
@@ -182,6 +286,8 @@ const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   grep: 'search_text', search: 'search_text', search_files: 'search_text',
   shell: 'bash', run: 'bash', terminal: 'bash', execute_command: 'bash', run_command: 'bash',
   fetch: 'web_fetch', search_web: 'web_search',
+  worklist_plan: TODO_PLAN_TOOL, plan_todo: TODO_PLAN_TOOL,
+  worklist_update: TODO_UPDATE_TOOL, update_todo: TODO_UPDATE_TOOL,
 }
 
 /** The offered tool a model-written name refers to, and whether an alias was needed. */
@@ -219,6 +325,12 @@ const ARGUMENT_ALIASES: Readonly<Record<string, Readonly<Record<string, readonly
   bash: { command: ['cmd', 'script', 'code', 'shell'] },
   web_fetch: { url: ['link', 'href', 'page'] },
   web_search: { query: ['q', 'keywords', 'search', 'search_query'] },
+  [TODO_PLAN_TOOL]: { items: ['todos', 'tasks', 'steps', 'plan'] },
+  [TODO_UPDATE_TOOL]: {
+    id: ['index', 'item_id', 'task_id', 'step'],
+    note: ['notes', 'summary', 'finding', 'findings', 'conclusion', 'result'],
+    content: ['title', 'task', 'text', 'description'],
+  },
 }
 
 /** The same table for DSH-named tools: trained and Claude-style keys → DSH keys. */
@@ -241,6 +353,12 @@ const NATIVE_ARGUMENT_ALIASES: Readonly<Record<string, Readonly<Record<string, r
   bash: { command: ['cmd', 'script', 'code', 'shell'] },
   web_fetch: { url: ['link', 'href', 'page'] },
   web_search: { queries: ['query', 'q', 'keywords', 'search', 'search_query'] },
+  [TODO_PLAN_TOOL]: { items: ['todos', 'tasks', 'steps', 'plan'] },
+  [TODO_UPDATE_TOOL]: {
+    id: ['index', 'item_id', 'task_id', 'step'],
+    note: ['notes', 'summary', 'finding', 'findings', 'conclusion', 'result'],
+    content: ['title', 'task', 'text', 'description'],
+  },
 }
 
 function renameAliases(args: Args, aliases: Readonly<Record<string, readonly string[]>>): Args | undefined {
@@ -320,6 +438,20 @@ export function repairNativeValues(tool: WireTool, args: Args): { args: Args; re
         else delete edit().limit
         repairs.push(`${key}_below_one`)
       }
+    }
+  }
+  if (tool.dshName === TODO_PLAN_TOOL && current().items !== undefined) {
+    const parsed = parsePlanItems(current().items)
+    if (parsed !== undefined && JSON.stringify(parsed) !== JSON.stringify(current().items)) {
+      edit().items = parsed
+      repairs.push('plan_items_coerced')
+    }
+  }
+  if (tool.dshName === TODO_UPDATE_TOOL && typeof current().status === 'string') {
+    const normalized = normalizeWorklistStatus(current().status)
+    if (normalized !== undefined && normalized !== current().status) {
+      edit().status = normalized
+      repairs.push('worklist_status_alias')
     }
   }
   return { args: out ?? args, repairs }
@@ -421,6 +553,8 @@ export function buildCatalog(offered: readonly DshToolSchema[], options: Catalog
   const exclude = new Set(options.exclude ?? [])
   // The line-range edit replaces the literal one wherever it is mounted.
   if (offered.some(tool => tool.name === 'edit_lines')) exclude.add('edit')
+  // Stateful worklist replaces DSH's whole-list `todo_write` when offered and active.
+  if (offered.some(tool => tool.name === TODO_PLAN_TOOL) && !exclude.has(TODO_PLAN_TOOL)) exclude.add('todo_write')
   const tools: WireTool[] = []
   for (const tool of offered) {
     const mapping = BUILTIN_MAPPINGS[tool.name]

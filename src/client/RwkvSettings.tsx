@@ -68,7 +68,7 @@ const AGENT_FAST: Sampling = { temperature: 0.3, topK: 65536, topP: 0.5, presenc
 
 const RUN_DEFAULTS: RunSettings = {
   thinking: 'full',
-  historyEmptyThink: true,
+  historyEmptyThink: false,
   maxSteps: 15,
   maxConsecutiveFailures: 2,
   protocolRetries: 2,
@@ -338,7 +338,7 @@ function ModelEditor(props: {
             <Field label="历史步骤不带思考">
               <SelectInput
                 value={draft.historyEmptyThink === undefined ? '' : draft.historyEmptyThink ? 'on' : 'off'} disabled={disabled}
-                options={[['', '跟随运行参数'], ['on', '开'], ['off', '关']] as const}
+                options={[['', '跟随运行参数'], ['off', '关（保留全量历史思考）'], ['on', '开（兼容旧空思考权重）']] as const}
                 onChange={value => set('historyEmptyThink', value === '' ? undefined : value === 'on')}
               />
             </Field>
@@ -380,7 +380,12 @@ function ModelCard(props: {
           {stateId ? <span className="rwkv-dot" title={`state ${stateId}`} /> : null}
           {adapterId ? <span className="rwkv-dot" title={`adapter ${adapterId}`} /> : null}
         </span>
-        <span className="rwkv-meta">{model.model}{stateId ? ` · state ${stateId}` : ''}{adapterId ? ` · adapter ${adapterId}` : ''}</span>
+        <span className="rwkv-meta">
+          {model.model}
+          {stateId ? ` · state ${stateId}` : ''}
+          {adapterId ? ` · adapter ${adapterId}` : ''}
+          {model.historyEmptyThink === true ? ' · 空思考历史' : model.historyEmptyThink === false ? ' · 保留历史思考' : ''}
+        </span>
         <span className="rwkv-actions">
           {props.editing ? null : confirming ? (
             <>
@@ -404,7 +409,8 @@ function ModelCard(props: {
 
 function runSummary(run: RunSettings): string {
   const sampling = same(run.sampling, AGENT_FAST) ? '推荐采样' : `T ${run.sampling.temperature} · top_p ${run.sampling.topP}`
-  return `思考${run.thinking === 'full' ? '开' : '关'} · 每轮 ${run.maxSteps} 步 · ${sampling}`
+  const histThink = run.historyEmptyThink ? '历史思考留空' : '保留历史思考'
+  return `思考${run.thinking === 'full' ? '开' : '关'}（${histThink}） · 每轮 ${run.maxSteps} 步 · ${sampling}`
 }
 
 type NumericRunField = 'maxSteps' | 'maxConsecutiveFailures' | 'protocolRetries' | 'decisionMaxTokens' | 'answerMaxTokens'
@@ -446,7 +452,7 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
         <Field label="作答 max tokens">{num('answerMaxTokens')}</Field>
       </div>
       <div className="rwkv-checks">
-        <Check label="历史步骤不带思考" checked={draft.historyEmptyThink} disabled={disabled} onChange={value => update({ historyEmptyThink: value })} />
+        <Check label="历史步骤不带思考（兼容旧版空思考训练权重；默认关闭以保留历史思维链）" checked={draft.historyEmptyThink} disabled={disabled} onChange={value => update({ historyEmptyThink: value })} />
         <Check label="复读时截断生成" checked={draft.loopGuard} disabled={disabled} onChange={value => update({ loopGuard: value })} />
         <Check label="系统提示词末尾写当前日期和时区" checked={draft.currentDate} disabled={disabled} onChange={value => update({ currentDate: value })} />
       </div>

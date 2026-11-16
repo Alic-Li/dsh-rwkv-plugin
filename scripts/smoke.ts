@@ -25,7 +25,7 @@ const { positionals, values } = parseArgs({
     adapter: { type: 'string' },
     task: { type: 'string', default: '读一下 config/app.json，告诉我服务监听的端口是多少，以及日志级别。' },
     off: { type: 'boolean', default: false },
-    'empty-think': { type: 'boolean', default: true },
+    'empty-think': { type: 'boolean', default: false },
   },
 })
 const [backend, baseURL, model] = positionals

@@ -44,9 +44,11 @@ export interface Settings {
   loopGuard: boolean
   outputRepairs: boolean
   guards: boolean
-  historyMode: 'full' | 'relay'
+  historyMode: 'full' | 'relay' | 'worklist'
   relayBudgetTokens: number
   relayCardMaxTokens: number
+  worklistBudgetTokens: number
+  worklistKeepRecentPairs: number
   recordTraces: boolean
   traceDir: string
 }
@@ -82,7 +84,7 @@ export const Config = z.object({
   thinking: z.union(['off', 'full']).default(DEFAULT_HARNESS.thinking)
     .description('full = agent-wire-think-v1.0 (prompt ends with "Assistant: <think"); off = agent-wire-v1.0.').volatile(),
   historyEmptyThink: z.boolean().default(DEFAULT_HARNESS.historyEmptyThink)
-    .description('agent-wire-think-v2.0 (think-sft): an empty think block before every past assistant step.').volatile(),
+    .description('false (default): keep full past-step thinking in history; true: legacy empty <think></think> before past assistant steps.').volatile(),
   maxSteps: z.natural().default(DEFAULT_HARNESS.maxSteps).description('Tool calls per user turn before the forced closeout.').volatile(),
   maxConsecutiveFailures: z.natural().default(DEFAULT_HARNESS.maxConsecutiveFailures).volatile(),
   protocolRetries: z.natural().default(DEFAULT_HARNESS.protocolRetries).volatile(),
@@ -114,12 +116,16 @@ export const Config = z.object({
     .description('Fix near-miss output: parser repairs, tool name / argument aliases, scalar coercion, DSH value repairs, path repair. Off: exact protocol form only, arguments reach DSH as written.').volatile(),
   guards: z.boolean().default(DEFAULT_HARNESS.guards)
     .description('Harness interventions: format re-asks, duplicate / failure gates, over-budget think close, answer-stage re-asks and fallbacks. Off: the model\'s output stands.').volatile(),
-  historyMode: z.union(['full', 'relay']).default('full')
-    .description('full: the model reads the whole conversation. relay: finished legs are replaced by model-written handoff cards; the most recent call/result pair stays verbatim and the duplicate-call gate restarts at each leg.').volatile(),
+  historyMode: z.union(['full', 'relay', 'worklist']).default('full')
+    .description('full: the model reads the whole conversation. relay: finished legs are replaced by model-written handoff cards. worklist: `todo_plan` + `todo_update` carry step order and notes while folding intermediate tool outputs.').volatile(),
   relayBudgetTokens: z.natural().default(8000)
     .description('relay: exact RWKV token budget for the part of the leg that gets carded; the latest call/result pair is always kept.').volatile(),
   relayCardMaxTokens: z.natural().default(768)
     .description('relay: output cap of one handoff recap.').volatile(),
+  worklistBudgetTokens: z.natural().default(8000)
+    .description('worklist: total RWKV prompt token budget before attaching a non-withdrawn budget reminder (`todo_plan` / `todo_update`).').volatile(),
+  worklistKeepRecentPairs: z.natural().default(2)
+    .description('worklist: recent workspace call/result pairs kept right before a noted `todo_update` checkpoint (gentle folding).').volatile(),
   recordTraces: z.boolean().default(true)
     .description('Write RWKV traces (prompt bytes + raw output, outcome, repairs) to disk: rwkv-trace.jsonl next to each DSH session log, or traceDir. They are always kept in memory for the RWKV tab.').volatile(),
   traceDir: z.string().default('').description('Custom trace directory (<session>.jsonl per session); empty = next to the DSH session logs.').volatile(),
@@ -155,6 +161,14 @@ function settingsOf(config: Config): AdapterSettings {
     loopGuard: config.loopGuard.get(),
     ...config.historyMode.get() === 'relay'
       ? { relay: { budgetTokens: config.relayBudgetTokens.get(), cardMaxTokens: config.relayCardMaxTokens.get() } }
+      : {},
+    ...config.historyMode.get() === 'worklist'
+      ? {
+          worklist: {
+            budgetTokens: config.worklistBudgetTokens.get(),
+            keepRecentPairs: config.worklistKeepRecentPairs.get(),
+          },
+        }
       : {},
     ...config.recordTraces.get() ? { traces: traceLocationOf(config) } : {},
     log: message => console.log(`[rwkv-llm] ${message}`),

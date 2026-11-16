@@ -36,9 +36,9 @@ const { values, positionals } = parseArgs({
     model: { type: 'string' },
     state: { type: 'string' },
     adapter: { type: 'string' },
-    'empty-think': { type: 'boolean', default: true },
+    'empty-think': { type: 'boolean', default: false },
     thinking: { type: 'string', default: 'full' },
-    'max-steps': { type: 'string', default: '12' },
+    'max-steps': { type: 'string', default: '15' },
     'context-window': { type: 'string', default: '32768' },
     home: { type: 'string' },
     dsh: { type: 'string' },
@@ -55,6 +55,8 @@ const { values, positionals } = parseArgs({
     'line-edit': { type: 'boolean', default: true },
     // Native edit instead of edit_lines: an explicit opt-out for A/B runs.
     'native-edit': { type: 'boolean', default: false },
+    // Mount the stateful worklist tools (src/todo.ts); shown to the model only when historyMode is 'worklist'.
+    todo: { type: 'boolean', default: true },
     // System prompt ends with the current date (off: eval prompts match the training rows).
     'current-date': { type: 'boolean', default: false },
     // IANA zone for the date line and for DSH itself (TZ, so bash's `date` agrees).
@@ -133,6 +135,11 @@ writeFileSync(join(profileDir, 'cordis.patch.yml'), [
     ? ['- insert:', '    - id: rwkv-edit-lines', `      name: ${json(values.installed
       ? 'dsh-rwkv-plugin/line-edit'
       : pathToFileURL(join(pluginRoot, fromSource ? 'src/line-edit.ts' : 'lib/line-edit.js')).href)}`]
+    : []),
+  ...(values.todo
+    ? ['- insert:', '    - id: rwkv-todo', `      name: ${json(values.installed
+      ? 'dsh-rwkv-plugin/todo'
+      : pathToFileURL(join(pluginRoot, fromSource ? 'src/todo.ts' : 'lib/todo.js')).href)}`]
     : []),
   '- id: session-title-llm',
   '  disabled: true',

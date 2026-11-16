@@ -1,6 +1,6 @@
 {
   "name": "dsh-rwkv-plugin",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "license": "MIT",
   "description": "RWKV-7 G1 continuation models as a DeepSeek Harness LLM provider, with the RWKV-Agent harness (agent-wire XML, parser repairs, duplicate/closeout policy) ported in.",
@@ -46,6 +46,7 @@
   "exports": {
     ".": "./lib/index.js",
     "./line-edit": "./lib/line-edit.js",
+    "./todo": "./lib/todo.js",
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },

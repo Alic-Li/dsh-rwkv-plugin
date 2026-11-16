@@ -26,6 +26,15 @@ export interface TraceRecord {
   readonly changes?: readonly ArgumentChange[]
   /** Card records only: the history range this handoff card replaced. */
   readonly relay?: RelayCardTrace
+  /** Decision records in worklist mode. */
+  readonly worklist?: WorklistStepTrace
+}
+
+export interface WorklistStepTrace {
+  readonly promptTokens: number
+  readonly budgetTokens: number
+  readonly checkpointAt?: number
+  readonly nudged: boolean
 }
 
 /** Where the relay cut the conversation, and the card the model reads instead. */
@@ -124,7 +133,7 @@ export const OUTCOME_LABEL: Record<string, string> = {
   'duplicate-retry': '重复调用，再给一次',
   'closeout': '强制收尾',
   'rejected unknown-tool': '未知工具',
-  'rejected blocked': '连续失败封禁',
+  'rejected blocked': '调用被拦截（连续失败或连续更新工单）',
   'empty-exit': 'no_tool 没写回答',
   'raw': '原样输出（未修）',
 }

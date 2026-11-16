@@ -10,8 +10,8 @@ import type { Args, WireTool } from './tools.ts'
 export type HistoryItem =
   | { readonly kind: 'user'; readonly text: string }
   | { readonly kind: 'note'; readonly text: string }
-  | { readonly kind: 'assistant'; readonly text: string }
-  | { readonly kind: 'call'; readonly id: string; readonly name: string; readonly args: Args }
+  | { readonly kind: 'assistant'; readonly text: string; readonly reasoning?: string }
+  | { readonly kind: 'call'; readonly id: string; readonly name: string; readonly args: Args; readonly reasoning?: string }
   | { readonly kind: 'result'; readonly id: string; readonly name: string; readonly ok: boolean; readonly text: string }
 
 export const POST_TOOL_REMINDER = `Use the Tool results above to continue the current task.
@@ -185,8 +185,10 @@ export interface TurnResult {
 export interface TurnState {
   /** The current turn's user request, for language choices. */
   readonly task: string
-  /** Tool calls DSH executed in the current turn. */
+  /** Workspace tool calls DSH executed in the current turn (excludes worklist bookkeeping). */
   readonly steps: number
+  /** Consecutive worklist calls (`todo_plan`/`todo_update`) since the last workspace call. */
+  readonly consecutiveWorklistCalls: number
   readonly results: readonly TurnResult[]
   readonly successfulCalls: number
   /**
@@ -201,6 +203,8 @@ export interface TurnState {
   readonly consecutiveFailures: number
 }
 
+const BOOKKEEPING_TOOLS = new Set(['todo_plan', 'todo_update'])
+
 export function currentTurnStart(history: readonly HistoryItem[]): number {
   for (let index = history.length - 1; index >= 0; index--) {
     if (history[index]!.kind === 'user') return index
@@ -211,9 +215,10 @@ export function currentTurnStart(history: readonly HistoryItem[]): number {
 export interface TurnOptions {
   /**
    * First history item whose calls take part in the duplicate and failure
-   * gates. The relay mode resets them at each leg: a card keeps only paths, so
-   * re-reading a file after a cut is not a repeated call. Steps still count
-   * from the user turn's start, so maxSteps is unchanged.
+   * gates. The relay and worklist modes reset them at each cut/checkpoint:
+   * earlier raw file reads were folded out, so re-reading a file slice after a
+   * cut is not a repeated call. Workspace steps still count from the user
+   * turn's start, so maxSteps is unchanged.
    */
   readonly duplicateFrom?: number
 }
@@ -222,21 +227,29 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
   const start = currentTurnStart(history)
   const gateStart = Math.max(start, options.duplicateFrom ?? start)
   const first = history[start]
-  const calls = new Map<string, { key: string; mutating: boolean }>()
+  const calls = new Map<string, { name: string; key: string; mutating: boolean }>()
   const successKeys = new Set<string>()
   const failedEpochs = new Map<string, number>()
   const results: TurnResult[] = []
+  let workspaceSteps = 0
+  let consecutiveWorklistCalls = 0
   let successfulCalls = 0
   let consecutiveFailedTool = ''
   let consecutiveFailures = 0
   for (let index = start; index < history.length; index++) {
     const item = history[index]!
     if (item.kind === 'call') {
-      calls.set(item.id, { key: callKey(item.name, item.args), mutating: isMutatingCall(item.name, item.args) })
+      calls.set(item.id, { name: item.name, key: callKey(item.name, item.args), mutating: isMutatingCall(item.name, item.args) })
     }
     if (item.kind !== 'result') continue
-    const { key, mutating } = calls.get(item.id) ?? { key: callKey(item.name, {}), mutating: false }
+    const { name: calledName, key, mutating } = calls.get(item.id) ?? { name: item.name, key: callKey(item.name, {}), mutating: false }
     results.push({ name: item.name, ok: item.ok })
+    if (BOOKKEEPING_TOOLS.has(calledName) || BOOKKEEPING_TOOLS.has(item.name)) {
+      consecutiveWorklistCalls++
+    } else {
+      workspaceSteps++
+      consecutiveWorklistCalls = 0
+    }
     if (index < gateStart) continue
     if (item.ok) {
       if (mutating) successKeys.clear()
@@ -256,7 +269,8 @@ export function analyzeTurn(history: readonly HistoryItem[], options: TurnOption
   }
   return {
     task: first?.kind === 'user' ? first.text : '',
-    steps: results.length,
+    steps: workspaceSteps,
+    consecutiveWorklistCalls,
     results,
     successfulCalls,
     successKeys,
@@ -310,10 +324,10 @@ export function transcriptEntries(history: readonly HistoryItem[], options: Tran
         entries.push({ role: 'user', text: item.text })
         break
       case 'assistant':
-        entries.push({ role: 'assistant', text: item.text })
+        entries.push({ role: 'assistant', text: item.text, ...(item.reasoning ? { reasoning: item.reasoning } : {}) })
         break
       case 'call':
-        entries.push({ role: 'assistant', text: recordToolCall(item.name, item.args) })
+        entries.push({ role: 'assistant', text: recordToolCall(item.name, item.args), ...(item.reasoning ? { reasoning: item.reasoning } : {}) })
         break
       case 'result': {
         const body = truncateResult(item.text, options.maxResultChars)

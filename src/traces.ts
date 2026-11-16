@@ -135,6 +135,8 @@ export interface TraceRecord {
   readonly guards?: boolean
   /** Card records only: the history range this handoff card replaced. */
   readonly relay?: { readonly from: number; readonly to: number; readonly turn: number; readonly fallback: boolean; readonly card: string }
+  /** Decision records in worklist mode: token budget state and active checkpoint index. */
+  readonly worklist?: { readonly promptTokens: number; readonly budgetTokens: number; readonly checkpointAt?: number; readonly nudged: boolean }
 }
 
 const SESSION_FILE = /^[\w.-]+\.jsonl$/

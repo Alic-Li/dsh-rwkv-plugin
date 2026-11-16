@@ -20,6 +20,7 @@ import { dshSystemSections } from './core/dsh-prompt.ts'
 import { currentDateLine } from './core/prompt.ts'
 import type { RelayOptions } from './core/relay.ts'
 import { buildCatalog, type ToolMode, type ToolNames, type ToolOverride } from './core/tools.ts'
+import { TODO_PLAN_TOOL, TODO_UPDATE_TOOL, type WorklistOptions } from './core/worklist.ts'
 import { historyFromMessages, systemText } from './history.ts'
 import { RelayCardStore } from './relay-store.ts'
 import { argumentChanges, clipArguments, memoryTraces, TraceLocation, type ArgumentChange } from './traces.ts'
@@ -76,6 +77,8 @@ export interface AdapterSettings {
   readonly traces?: TraceLocation
   /** Turn-relay context; absent: the full history is rendered. */
   readonly relay?: RelayOptions
+  /** Stateful worklist context; absent: `todo_plan` / `todo_update` stay hidden. */
+  readonly worklist?: WorklistOptions
   readonly log?: (message: string) => void
 }
 
@@ -192,9 +195,13 @@ export class RwkvAdapter extends LlmAdapter {
       },
       ...this.settings.currentDate ? { dateLine: currentDateLine(Date.now(), this.settings.timeZone) } : {},
       ...this.settings.relay === undefined ? {} : { relay: this.settings.relay },
+      ...this.settings.worklist === undefined ? {} : { worklist: this.settings.worklist },
     }
     const names = this.settings.toolNames
-    const catalog = buildCatalog(options.tools ?? [], { mode: this.settings.toolMode, names, exclude: this.settings.excludeTools, overrides: this.settings.toolOverrides })
+    const exclude = this.settings.worklist === undefined
+      ? [...this.settings.excludeTools, TODO_PLAN_TOOL, TODO_UPDATE_TOOL]
+      : this.settings.excludeTools
+    const catalog = buildCatalog(options.tools ?? [], { mode: this.settings.toolMode, names, exclude, overrides: this.settings.toolOverrides })
     const history = historyFromMessages(options.messages, catalog, { includeDeveloper: this.settings.includeDeveloper, names, dropTimeContext: this.settings.currentDate === true })
     const systemHead = names === 'dsh' ? dshSystemSections(options.system ?? systemText(options.messages)) : undefined
 

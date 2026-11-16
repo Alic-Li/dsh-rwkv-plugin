@@ -1,0 +1,345 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import type { GenerateRequest, GenerateResult, Generator } from '../src/backend/generator.ts'
+import { decideStep, DEFAULT_HARNESS, type HarnessConfig } from '../src/core/agent.ts'
+import { analyzeTurn, type HistoryItem } from '../src/core/policy.ts'
+import { buildCatalog } from '../src/core/tools.ts'
+import {
+  applyTodoPlan,
+  applyTodoUpdate,
+  foldWorklist,
+  formatWorklist,
+  TODO_PLAN_TOOL,
+  TODO_UPDATE_TOOL,
+  WORKLIST_CHECKPOINT_NUDGE,
+  WORKLIST_INIT_NUDGE,
+} from '../src/core/worklist.ts'
+
+class ScriptedGenerator implements Generator {
+  readonly prompts: string[] = []
+  private readonly outputs: string[]
+
+  constructor(outputs: string[]) {
+    this.outputs = [...outputs]
+  }
+
+  generate(request: GenerateRequest): Promise<GenerateResult> {
+    this.prompts.push(request.prompt)
+    const next = this.outputs.shift()
+    if (next === undefined) throw new Error('no scripted output left')
+    return Promise.resolve({ text: next, finish: 'stop', completionTokens: 10 })
+  }
+}
+
+const offeredWithTodo = [
+  { name: 'read', description: 'Read a file.', parameters: { properties: { file_path: { type: 'string' } } } },
+  { name: 'write', description: 'Write a file.', parameters: { properties: { file_path: { type: 'string' }, content: { type: 'string' } } } },
+  { name: 'todo_write', description: 'Stock DSH todo.', parameters: { properties: { todos: { type: 'array' } } } },
+  { name: TODO_PLAN_TOOL, description: 'Plan work.', parameters: { properties: { items: { type: 'array', items: { type: 'string' } } }, required: ['items'] } },
+  {
+    name: TODO_UPDATE_TOOL,
+    description: 'Update item.',
+    parameters: {
+      properties: {
+        id: { type: 'integer' },
+        status: { type: 'string', enum: ['in_progress', 'completed', 'dropped'] },
+        note: { type: 'string' },
+        content: { type: 'string' },
+      },
+      required: ['id', 'status'],
+    },
+  },
+]
+
+test('worklist: applyTodoPlan activates #1 and preserves completed notes on mid-turn replan', () => {
+  const initial = applyTodoPlan([], ['Locate token config', 'Change default TTL to 3600s', 'Run unit tests'])
+  assert.ok(Array.isArray(initial))
+  assert.equal(initial.length, 3)
+  assert.equal(initial[0]!.status, 'in_progress')
+  assert.equal(initial[1]!.status, 'pending')
+
+  // Missing note on completed is rejected.
+  const missingNote = applyTodoUpdate(initial, { id: 1, status: 'completed' })
+  assert.equal(typeof missingNote, 'string')
+  assert.match(missingNote as string, /note is required/)
+
+  // Valid completion records note and auto-advances #2 to in_progress.
+  const doneOne = applyTodoUpdate(initial, {
+    id: 1,
+    status: 'completed',
+    note: 'src/auth/jwt.ts:18 DEFAULT_EXP=900',
+  })
+  assert.equal(typeof doneOne, 'object')
+  if (typeof doneOne === 'string') throw new Error(doneOne)
+  assert.equal(doneOne.noted, true)
+  assert.equal(doneOne.items[0]!.status, 'completed')
+  assert.equal(doneOne.items[0]!.note, 'src/auth/jwt.ts:18 DEFAULT_EXP=900')
+  assert.equal(doneOne.items[1]!.status, 'in_progress')
+
+  // Mid-turn replan splits remaining work while locking #1 and its note.
+  const replanned = applyTodoPlan(doneOne.items, [
+    'Update src/auth/jwt.ts DEFAULT_EXP to 3600',
+    'Sync config/default.json tokenTtl',
+    'Add expiry test and run npm test',
+  ])
+  assert.ok(Array.isArray(replanned))
+  assert.equal(replanned.length, 4)
+  assert.equal(replanned[0]!.status, 'completed')
+  assert.equal(replanned[0]!.note, 'src/auth/jwt.ts:18 DEFAULT_EXP=900')
+  assert.equal(replanned[1]!.status, 'in_progress')
+  assert.equal(replanned[1]!.content, 'Update src/auth/jwt.ts DEFAULT_EXP to 3600')
+  assert.equal(replanned[2]!.status, 'pending')
+})
+
+test('worklist: catalog hides todo_write when todo_plan is active, and hides todo_* when excluded', () => {
+  const active = buildCatalog(offeredWithTodo, { mode: 'passthrough', names: 'dsh' })
+  assert.ok(active.some(t => t.name === TODO_PLAN_TOOL))
+  assert.ok(active.some(t => t.name === TODO_UPDATE_TOOL))
+  assert.ok(!active.some(t => t.name === 'todo_write'))
+
+  const fullMode = buildCatalog(offeredWithTodo, {
+    mode: 'mapped',
+    names: 'dsh',
+    exclude: [TODO_PLAN_TOOL, TODO_UPDATE_TOOL],
+  })
+  assert.ok(!fullMode.some(t => t.name === TODO_PLAN_TOOL))
+  assert.ok(!fullMode.some(t => t.name === TODO_UPDATE_TOOL))
+})
+
+test('worklist: gentle folding keeps initial todo_plan + latest 2 workspace pairs while folding older exploration', async () => {
+  const tools = buildCatalog(offeredWithTodo, { mode: 'mapped', names: 'dsh' })
+  const listAfterOne = formatWorklist([
+    { id: 1, status: 'completed', content: 'Locate auth config', note: 'src/auth/jwt.ts:18 DEFAULT_EXP=900' },
+    { id: 2, status: 'in_progress', content: 'Edit DEFAULT_EXP to 3600' },
+  ])
+  const history: HistoryItem[] = [
+    { kind: 'user', text: 'Change login TTL to 3600 and verify.' },
+    { kind: 'call', id: 'c1', name: TODO_PLAN_TOOL, args: { items: ['Locate auth config', 'Edit DEFAULT_EXP to 3600'] } },
+    { kind: 'result', id: 'c1', name: TODO_PLAN_TOOL, ok: true, text: 'Todo list:\n[1] (in_progress) Locate auth config\n[2] (pending) Edit DEFAULT_EXP to 3600' },
+    { kind: 'call', id: 'c2', name: 'read', args: { file_path: 'src/old-explore.ts' } },
+    { kind: 'result', id: 'c2', name: 'read', ok: true, text: '// FOLDED_EXPLORATION_MARKER' },
+    { kind: 'call', id: 'c3', name: 'read', args: { file_path: 'src/other.ts' } },
+    { kind: 'result', id: 'c3', name: 'read', ok: true, text: '// SECOND_FOLDED_MARKER' },
+    { kind: 'call', id: 'c4', name: 'read', args: { file_path: 'src/auth/jwt.ts' } },
+    { kind: 'result', id: 'c4', name: 'read', ok: true, text: '18: export const DEFAULT_EXP = 900 // KEPT_RECENT_PAIR_1' },
+    { kind: 'call', id: 'c5', name: 'bash', args: { command: 'npm test' } },
+    { kind: 'result', id: 'c5', name: 'bash', ok: true, text: 'KEPT_RECENT_PAIR_2\n[exit code: 0]' },
+    { kind: 'call', id: 'c6', name: TODO_UPDATE_TOOL, args: { id: 1, status: 'completed', note: 'src/auth/jwt.ts:18 DEFAULT_EXP=900' } },
+    { kind: 'result', id: 'c6', name: TODO_UPDATE_TOOL, ok: true, text: listAfterOne },
+  ]
+
+  // Re-reading folded `src/old-explore.ts` after checkpoint must NOT be blocked as duplicate.
+  const gen = new ScriptedGenerator([
+    '>Re-check old-explore.ts.</think><tool_call>{"name":"read","arguments":{"file_path":"src/old-explore.ts"}}',
+  ])
+  const config: HarnessConfig = { ...DEFAULT_HARNESS, worklist: { budgetTokens: 8000 } }
+  const step = await decideStep({ history, tools, config, generator: gen })
+  assert.equal(step.decision.type, 'tool')
+  if (step.decision.type === 'tool') assert.equal(step.decision.tool.name, 'read')
+
+  const prompt = gen.prompts[0]!
+  assert.match(prompt, /call todo_plan early before editing, and call todo_update with a concise note/, 'worklist system guidance is injected')
+  assert.doesNotMatch(prompt, /FOLDED_EXPLORATION_MARKER/, 'older exploratory read is folded out')
+  assert.doesNotMatch(prompt, /SECOND_FOLDED_MARKER/, 'second older exploratory read is folded out')
+  assert.match(prompt, /"name":"todo_plan"/, 'initial todo_plan call is kept for ownership continuity')
+  assert.match(prompt, /KEPT_RECENT_PAIR_1/, '2nd-most-recent workspace pair before checkpoint is kept')
+  assert.match(prompt, /KEPT_RECENT_PAIR_2/, 'most-recent workspace pair before checkpoint is kept')
+  assert.match(prompt, /src\/auth\/jwt\.ts:18 DEFAULT_EXP=900/, 'note stays in the worklist anchor')
+  assert.match(prompt, /\[2\] \(in_progress\) Edit DEFAULT_EXP to 3600/)
+
+  // Bookkeeping steps do not consume the 15-step workspace budget.
+  const turnState = analyzeTurn(history)
+  assert.equal(turnState.steps, 4)
+})
+
+test('worklist: hardCap strips bloated old reasoning before dropping workspace read results', () => {
+  const bloatedReasoning = 'Wait let me reconsider the interface contract. '.repeat(900)
+  const history: HistoryItem[] = [
+    { kind: 'user', text: 'Fix RestockBook.java.' },
+    { kind: 'call', id: 'r1', name: 'read', args: { file_path: 'RestockBook.java' }, reasoning: 'Read source.' },
+    { kind: 'result', id: 'r1', name: 'read', ok: true, text: '27: public static List<String> process() // MUST_KEEP_SOURCE' },
+    { kind: 'call', id: 'b1', name: 'bash', args: { command: 'javac' }, reasoning: bloatedReasoning },
+    { kind: 'result', id: 'b1', name: 'bash', ok: true, text: '[exit code: 0]' },
+  ]
+  const folded = foldWorklist(history, { systemTokens: 1000, budgetTokens: 3000, hardCapTokens: 4500, historyEmptyThink: false })
+  assert.ok(folded.items.some(item => item.kind === 'result' && item.text.includes('MUST_KEEP_SOURCE')), 'source file read is preserved!')
+  assert.ok(folded.items.every(item => (item.kind !== 'call' && item.kind !== 'assistant') || !item.reasoning?.includes('Wait let me reconsider')), 'bloated reasoning stripped first')
+})
+
+test('worklist: exceeding configurable budgetTokens injects checkpoint nudge; completed turn keeps backbone', () => {
+  const bigRead = 'line content '.repeat(600)
+  const turnOne: HistoryItem[] = [
+    { kind: 'user', text: 'Turn 1 multi-step edit.' },
+    { kind: 'call', id: 't1c1', name: TODO_PLAN_TOOL, args: { items: ['Step A', 'Step B'] } },
+    { kind: 'result', id: 't1c1', name: TODO_PLAN_TOOL, ok: true, text: 'Todo list:\n[1] (in_progress) Step A\n[2] (pending) Step B' },
+    { kind: 'call', id: 't1c2', name: 'read', args: { file_path: 'big.ts' } },
+    { kind: 'result', id: 't1c2', name: 'read', ok: true, text: bigRead },
+  ]
+
+  // With a tight budget (e.g. 1500), nudge triggers; with a 12000 budget, it does not.
+  const tight = foldWorklist(turnOne, { systemTokens: 800, budgetTokens: 1500 })
+  assert.equal(tight.nudge, WORKLIST_CHECKPOINT_NUDGE)
+
+  const generous = foldWorklist(turnOne, { systemTokens: 800, budgetTokens: 12000 })
+  assert.equal(generous.nudge, undefined)
+
+  // Without an active worklist yet, exceeding budget nudges `todo_plan`.
+  const unplanned: HistoryItem[] = [
+    { kind: 'user', text: 'Investigate failure.' },
+    { kind: 'call', id: 'u1', name: 'read', args: { file_path: 'big.ts' } },
+    { kind: 'result', id: 'u1', name: 'read', ok: true, text: bigRead },
+  ]
+  const unplannedFold = foldWorklist(unplanned, { systemTokens: 800, budgetTokens: 1500 })
+  assert.equal(unplannedFold.nudge, WORKLIST_INIT_NUDGE)
+
+  // Once Turn 1 finishes and Turn 2 starts, Turn 1 keeps user + final worklist + final answer, dropping bigRead.
+  const multiTurn: HistoryItem[] = [
+    ...turnOne,
+    { kind: 'call', id: 't1c3', name: TODO_UPDATE_TOOL, args: { id: 1, status: 'completed', note: 'big.ts checked' } },
+    { kind: 'result', id: 't1c3', name: TODO_UPDATE_TOOL, ok: true, text: 'Todo list:\n[1] (completed) Step A\n  note: big.ts checked\n[2] (in_progress) Step B' },
+    { kind: 'assistant', text: 'Finished Turn 1.' },
+    { kind: 'user', text: 'Turn 2 follow-up question.' },
+  ]
+  const turnTwoFold = foldWorklist(multiTurn, { systemTokens: 800, budgetTokens: 8000 })
+  assert.ok(!turnTwoFold.items.some(item => item.kind === 'result' && item.text === bigRead))
+  assert.ok(turnTwoFold.items.some(item => item.kind === 'user' && item.text === 'Turn 1 multi-step edit.'))
+  assert.ok(turnTwoFold.items.some(item => item.kind === 'result' && item.text.includes('note: big.ts checked')))
+  assert.ok(turnTwoFold.items.some(item => item.kind === 'assistant' && item.text === 'Finished Turn 1.'))
+  assert.ok(turnTwoFold.items.some(item => item.kind === 'user' && item.text === 'Turn 2 follow-up question.'))
+})
+
+test('worklist: consecutive worklist spin guard blocks a third consecutive bookkeeping call', async () => {
+  const tools = buildCatalog(offeredWithTodo, { mode: 'mapped', names: 'dsh' })
+  const history: HistoryItem[] = [
+    { kind: 'user', text: 'Fix bug.' },
+    { kind: 'call', id: 'c1', name: TODO_PLAN_TOOL, args: { items: ['Step 1', 'Step 2'] } },
+    { kind: 'result', id: 'c1', name: TODO_PLAN_TOOL, ok: true, text: 'Todo list...' },
+    { kind: 'call', id: 'c2', name: TODO_UPDATE_TOOL, args: { id: 1, status: 'in_progress', note: 'partial' } },
+    { kind: 'result', id: 'c2', name: TODO_UPDATE_TOOL, ok: true, text: 'Todo list...' },
+  ]
+  const gen = new ScriptedGenerator([
+    // 3rd consecutive worklist call -> blocked by spin guard; model then calls `read` on retry.
+    '>Spin.</think><tool_call>{"name":"todo_update","arguments":{"id":1,"status":"in_progress","note":"more"}}',
+    '>Now read.</think><tool_call>{"name":"read","arguments":{"file_path":"a.ts"}}',
+  ])
+  const config: HarnessConfig = { ...DEFAULT_HARNESS, worklist: { budgetTokens: 8000 } }
+  const step = await decideStep({ history, tools, config, generator: gen })
+  assert.equal(step.generations, 2)
+  assert.equal(step.decision.type, 'tool')
+  if (step.decision.type === 'tool') assert.equal(step.decision.tool.name, 'read')
+})
+
+test('full CoT history (historyEmptyThink=false): keeps unfolded reasoning and collapses blank lines inside think', async () => {
+  const tools = buildCatalog(offeredWithTodo, { mode: 'mapped', names: 'dsh' })
+  const history: HistoryItem[] = [
+    { kind: 'user', text: 'Inspect and edit a.ts.' },
+    { kind: 'call', id: 'c1', name: 'read', args: { file_path: 'a.ts' }, reasoning: 'First paragraph.\n\nSecond paragraph.' },
+    { kind: 'result', id: 'c1', name: 'read', ok: true, text: '1: const x = 1' },
+  ]
+  const gen = new ScriptedGenerator([
+    '>Now answer.</think>x is 1.',
+  ])
+  await decideStep({ history, tools, config: DEFAULT_HARNESS, generator: gen })
+  assert.equal(DEFAULT_HARNESS.historyEmptyThink, false)
+  assert.match(gen.prompts[0]!, /Assistant: <think>First paragraph\.\nSecond paragraph\.<\/think><tool_call>/)
+
+  // Legacy empty-think mode still strips past reasoning when requested.
+  const genEmpty = new ScriptedGenerator(['>Now answer.</think>x is 1.'])
+  await decideStep({ history, tools, config: { ...DEFAULT_HARNESS, historyEmptyThink: true }, generator: genEmpty })
+  assert.match(genEmpty.prompts[0]!, /Assistant: <think><\/think><tool_call>/)
+})
+
+test('worklist: non-withdrawn budget reminders preserve strict append-only prefix continuity and cooldown', async () => {
+  const tools = buildCatalog(offeredWithTodo, { mode: 'mapped', names: 'dsh' })
+  const bigRead = 'line content '.repeat(500)
+  const config: HarnessConfig = { ...DEFAULT_HARNESS, worklist: { budgetTokens: 1500, hardCapTokens: 8000 } }
+
+  // Step 1 finishes a large read -> triggers WORKLIST_INIT_NUDGE at the tail.
+  const h1: HistoryItem[] = [
+    { kind: 'user', text: 'Inspect big.ts and make the quick fix.' },
+    { kind: 'call', id: 'u1', name: 'read', args: { file_path: 'big.ts' }, reasoning: 'Read big.ts first.' },
+    { kind: 'result', id: 'u1', name: 'read', ok: true, text: bigRead },
+  ]
+  const gen1 = new ScriptedGenerator(['>Budget reminder noted, but only 1 write left.</think><tool_call>{"name":"write","arguments":{"file_path":"big.ts","content":"ok"}}'])
+  await decideStep({ history: h1, tools, config, generator: gen1 })
+  const p1 = gen1.prompts[0]!
+  assert.ok(p1.includes(WORKLIST_INIT_NUDGE), 'step 2 prompt contains WORKLIST_INIT_NUDGE')
+
+  // Case A: Model skips todo_plan and writes directly -> INIT nudge stays in history (NOT withdrawn!) and cooldown prevents nag spam.
+  const h2Skip: HistoryItem[] = [
+    ...h1,
+    { kind: 'call', id: 'u2', name: 'write', args: { file_path: 'big.ts', content: 'ok' }, reasoning: 'Budget reminder noted, but only 1 write left.' },
+    { kind: 'result', id: 'u2', name: 'write', ok: true, text: 'wrote big.ts' },
+  ]
+  const fold2Skip = foldWorklist(h2Skip, { systemTokens: 800, budgetTokens: 1500, hardCapTokens: 8000 })
+  assert.equal(fold2Skip.nudge, undefined, 'cooldown suppresses nagging on the very next workspace step')
+  const gen2Skip = new ScriptedGenerator(['>Done.</think>Updated big.ts.'])
+  await decideStep({ history: h2Skip, tools, config, generator: gen2Skip })
+  const p2Skip = gen2Skip.prompts[0]!
+  const prefixBeforeGeneration1 = p1.slice(0, p1.length - 'Assistant: <think'.length)
+  assert.ok(p2Skip.startsWith(prefixBeforeGeneration1), 'step 3 prompt starts with exact byte-for-byte prefix of step 2 (reminder not withdrawn!)')
+
+  // Case B: Model obeys INIT nudge with todo_plan -> INIT nudge stays before todo_plan, and CHECKPOINT nudge fires right after todo_plan.
+  const h2Plan: HistoryItem[] = [
+    ...h1,
+    { kind: 'call', id: 'p1', name: TODO_PLAN_TOOL, args: { items: ['Inspect big.ts', 'Rewrite big.ts'] }, reasoning: 'Budget reached, creating plan.' },
+    { kind: 'result', id: 'p1', name: TODO_PLAN_TOOL, ok: true, text: 'Todo list:\n[1] (in_progress) Inspect big.ts\n[2] (pending) Rewrite big.ts' },
+  ]
+  const fold2Plan = foldWorklist(h2Plan, { systemTokens: 800, budgetTokens: 1500, hardCapTokens: 8000 })
+  assert.equal(fold2Plan.nudge, WORKLIST_CHECKPOINT_NUDGE)
+  const gen2Plan = new ScriptedGenerator(['>Now checkpoint.</think><tool_call>{"name":"todo_update","arguments":{"id":1,"status":"completed","note":"big.ts inspected"}}'])
+  await decideStep({ history: h2Plan, tools, config, generator: gen2Plan })
+  const p2Plan = gen2Plan.prompts[0]!
+  assert.ok(p2Plan.startsWith(prefixBeforeGeneration1), 'todo_plan step preserves exact byte-for-byte prefix including INIT nudge')
+  assert.ok(p2Plan.includes(WORKLIST_CHECKPOINT_NUDGE), 'CHECKPOINT nudge appended after todo_plan')
+})
+
+test('worklist: clears stale reasoning on discontinuous pinned firstPlan and preserves unplanned cross-turn + hardCap fallbacks', () => {
+  // 1. Discontinuous firstPlan clears reasoning once intermediate steps fold out.
+  const historyFoldedGap: HistoryItem[] = [
+    { kind: 'user', text: 'Refactor module.' },
+    { kind: 'call', id: 'p0', name: TODO_PLAN_TOOL, args: { items: ['Read files', 'Apply fix'] }, reasoning: 'STALE_STEP1_OPENING_THOUGHT' },
+    { kind: 'result', id: 'p0', name: TODO_PLAN_TOOL, ok: true, text: 'Todo list...' },
+    { kind: 'call', id: 'r1', name: 'read', args: { file_path: 'a.ts' }, reasoning: 'Read a.' },
+    { kind: 'result', id: 'r1', name: 'read', ok: true, text: 'a' },
+    { kind: 'call', id: 'r2', name: 'read', args: { file_path: 'b.ts' }, reasoning: 'Read b.' },
+    { kind: 'result', id: 'r2', name: 'read', ok: true, text: 'b' },
+    { kind: 'call', id: 'r3', name: 'read', args: { file_path: 'c.ts' }, reasoning: 'Read c.' },
+    { kind: 'result', id: 'r3', name: 'read', ok: true, text: 'c' },
+    { kind: 'call', id: 'u1', name: TODO_UPDATE_TOOL, args: { id: 1, status: 'completed', note: 'a,b,c read' }, reasoning: 'CHECKPOINT_THOUGHT' },
+    { kind: 'result', id: 'u1', name: TODO_UPDATE_TOOL, ok: true, text: 'Todo list:\n[1] (completed) Read files\n  note: a,b,c read\n[2] (in_progress) Apply fix' },
+  ]
+  const foldedGap = foldWorklist(historyFoldedGap, { systemTokens: 500, budgetTokens: 8000 })
+  const pinnedPlanCall = foldedGap.items.find(item => item.kind === 'call' && item.name === TODO_PLAN_TOOL)
+  assert.ok(pinnedPlanCall && pinnedPlanCall.kind === 'call')
+  assert.equal(pinnedPlanCall.reasoning, undefined, 'discontinuous pinned todo_plan clears stale reasoning')
+  const checkpointCall = foldedGap.items.find(item => item.kind === 'call' && item.name === TODO_UPDATE_TOOL)
+  assert.ok(checkpointCall && checkpointCall.kind === 'call')
+  assert.equal(checkpointCall.reasoning, 'CHECKPOINT_THOUGHT', 'active checkpoint reasoning stays intact')
+
+  // 2. Cross-turn unplanned fallback keeps last workspace call/result + ledger so Turn 2 never sees pure zero-tool chat.
+  const unplannedMultiTurn: HistoryItem[] = [
+    { kind: 'user', text: 'Turn 1: clean CSV.' },
+    { kind: 'call', id: 't1r', name: 'read', args: { file_path: '/app/orders.csv' } },
+    { kind: 'result', id: 't1r', name: 'read', ok: true, text: 'id,amt\n1,10' },
+    { kind: 'call', id: 't1w', name: 'write', args: { file_path: '/app/clean.csv', content: 'id,amt\n1,10\n' } },
+    { kind: 'result', id: 't1w', name: 'write', ok: true, text: 'wrote /app/clean.csv' },
+    { kind: 'assistant', text: 'Cleaned orders into /app/clean.csv.' },
+    { kind: 'user', text: 'Turn 2: drop rows with amt < 20.' },
+  ]
+  const crossTurn = foldWorklist(unplannedMultiTurn, { systemTokens: 500, budgetTokens: 8000 })
+  assert.ok(crossTurn.items.some(item => item.kind === 'note' && item.text.includes('- read /app/orders.csv -> ok')), 'earlier unplanned turn step summarized in ledger')
+  assert.ok(crossTurn.items.some(item => item.kind === 'call' && item.name === 'write'), 'completed unplanned turn retains its final real tool call')
+
+  // 3. In-turn unplanned hardCap overflow summarizes dropped oldest steps in a ledger instead of silently erasing them.
+  const huge = 'x '.repeat(1200)
+  const overflowTurn: HistoryItem[] = [
+    { kind: 'user', text: 'Fix failing service.' },
+    { kind: 'call', id: 'o1', name: 'read', args: { file_path: '/app/svc.py' } },
+    { kind: 'result', id: 'o1', name: 'read', ok: true, text: huge },
+    { kind: 'call', id: 'o2', name: 'bash', args: { command: 'pytest -q' } },
+    { kind: 'result', id: 'o2', name: 'bash', ok: true, text: `${huge}\n[exit code: 1]` },
+  ]
+  const hardFold = foldWorklist(overflowTurn, { systemTokens: 500, budgetTokens: 1500, hardCapTokens: 2500 })
+  assert.ok(hardFold.items.some(item => item.kind === 'note' && item.text.includes('- read /app/svc.py -> ok')), 'hardCap overflow inserts deterministic step ledger')
+})

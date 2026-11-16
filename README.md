@@ -79,7 +79,7 @@ User: 统计 data.csv 里每个城市的平均温度，结果写到 summary.md
 User: Current working directory: "/home/user/project".     ← DSH 运行时上下文只留工作目录、沙箱策略两段
 Current DSH file policy: workspace-write. …
 
-Assistant: <think></think><tool_call>{"name":"read","arguments":{"file_path":"…/data.csv"}}</tool_call>   ← 历史步骤的思考留空
+Assistant: <think>先看 data.csv 的列名和格式。</think><tool_call>{"name":"read","arguments":{"file_path":"…/data.csv"}}</tool_call>   ← 默认保留历史步骤思考（旧版空思考权重可在设置里勾「历史步骤不带思考」）
 
 User: <tool_response>{"ok":true,"tool":"read","result":"…"}</tool_response>
 
@@ -99,17 +99,18 @@ Assistant: <think                                           ← 模型从这里�
 | 功能 | 说明 |
 |---|---|
 | 后端 | rwkv_lightning CUDA（请求级 adapter 可选、支持上传初始 state）、iRWKV 续写接口 |
-| 工具 | bash、read、write、edit_lines、glob、grep、web_search、web_fetch，名字参数照 DSH 原样；训练时的旧名字（read_file…）自动认回 |
+| 工具 | bash、read、write、edit_lines、glob、grep、web_search、web_fetch（开启状态化工单时再加 todo_plan / todo_update）；训练时的旧名字自动认回 |
+| 上下文管理 | 完整对话（full）、状态化工单（worklist：按 note 温和折叠早期输出 + 不撤回预算提醒）、轮级接力卡（relay） |
 | 解析容错 | 先说话再调用、OpenAI 外壳、多余括号、字符串化参数等十来种写法 |
 | 检查与收尾 | 重复调用拦截、连续失败封禁、强制收尾、复读截断 |
-| 设置页 | 模型、state、参数、兜底开关，保存即生效 |
+| 设置页 | 模型、state / adapter、运行参数、上下文模式与兜底开关，保存即生效 |
 | 轨迹 | 每次生成的提示词和原始输出，对话视图的「RWKV」标签页可查 |
 | 测模型本身 | 两个开关关掉全部兜底，看模型原样能做到什么 |
 
 ## 已知限制
 
 - 一步只调一个工具，不能并行。
-- 没有 DSH 的上下文压缩，长会话迟早撑满窗口（默认报 32768 token）；RWKV 这边用接力卡片管上下文。
+- 不使用 DSH 内置的上下文压缩；长任务可在「开发者 → 上下文管理模式」中选状态化工单（worklist）或轮级接力卡（relay）管理窗口。
 - 只认文字，图片和附件换成占位符。
 - DSH 界面显示的内容比 RWKV 实际收到的多；要看实际收到什么，用「RWKV」标签页。
 

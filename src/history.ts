@@ -24,6 +24,14 @@ function textOf(content: readonly BlockLike[]): string {
   return parts.join('\n').trim()
 }
 
+function reasoningOf(content: readonly BlockLike[]): string {
+  const parts: string[] = []
+  for (const block of content) {
+    if (block.type === 'reasoning' && block.text) parts.push(block.text)
+  }
+  return parts.join('\n').trim()
+}
+
 function parseArgs(raw: string | undefined): Args {
   if (!raw) return {}
   try {
@@ -119,12 +127,13 @@ export function historyFromMessages(
       }
       case 'assistant': {
         const calls = content.filter(block => block.type === 'tool-call')
+        const reasoning = reasoningOf(content)
         if (calls.length === 0) {
           const text = textOf(content)
-          if (text) items.push({ kind: 'assistant', text })
+          if (text) items.push({ kind: 'assistant', text, ...(reasoning ? { reasoning } : {}) })
           break
         }
-        for (const call of calls) {
+        calls.forEach((call, callIdx) => {
           const dshName = call.name ?? ''
           const args = parseArgs(call.arguments)
           const wire = byDsh.get(dshName)
@@ -133,8 +142,8 @@ export function historyFromMessages(
           const wireArgs = wire ? wire.fromDsh(args) : mapping ? mapping.fromDsh(args) : args
           const id = call.id ?? `call-${items.length}`
           callNames.set(id, name)
-          items.push({ kind: 'call', id, name, args: wireArgs })
-        }
+          items.push({ kind: 'call', id, name, args: wireArgs, ...(callIdx === 0 && reasoning ? { reasoning } : {}) })
+        })
         break
       }
       case 'tool': {

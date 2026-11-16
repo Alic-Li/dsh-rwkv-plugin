@@ -46,6 +46,7 @@ import {
   type RelayOptions,
 } from './relay.ts'
 import { coerceArguments, normalizeArguments, repairNativeValues, resolveTool, type Args, type WireTool } from './tools.ts'
+import { isWorklistTool, worklistEntries, type WorklistOptions } from './worklist.ts'
 
 /** Pass-through answer for output the harness does not fix (guards off). */
 function rawFinal(output: string): Decision {
@@ -89,11 +90,18 @@ export interface HarnessConfig {
    * cards. Absent (the default): the full history is rendered as before.
    */
   readonly relay?: RelayOptions
+  /**
+   * Stateful work list (`todo_plan` + `todo_update`): intermediate tool calls
+   * before a noted `todo_update` are folded out, completed prior turns keep
+   * their user/final backbone plus the final worklist snapshot, and a gentle
+   * checkpoint nudge is appended once total prompt tokens exceed `budgetTokens`.
+   */
+  readonly worklist?: WorklistOptions
 }
 
 export const DEFAULT_HARNESS: HarnessConfig = {
   thinking: 'full',
-  historyEmptyThink: true,
+  historyEmptyThink: false,
   maxSteps: 15,
   maxConsecutiveFailures: 2,
   protocolRetries: 2,
@@ -142,6 +150,15 @@ export interface GenerationTrace {
    * stopped being able to re-read.
    */
   readonly relay?: RelayTrace
+  /** Worklist mode: prompt token estimate, active checkpoint cut, and whether a live budget reminder triggered. */
+  readonly worklist?: WorklistTrace
+}
+
+export interface WorklistTrace {
+  readonly promptTokens: number
+  readonly budgetTokens: number
+  readonly checkpointAt?: number
+  readonly nudged: boolean
 }
 
 /** What the relay cut before this step: covered history range and its user turn. */
@@ -251,7 +268,14 @@ function describe(action: Action): string {
 export async function decideStep(input: StepInput): Promise<StepResult> {
   const { config, tools, hooks } = input
   const reminder = config.thinking === 'full' ? POST_TOOL_REMINDER_THINK : POST_TOOL_REMINDER
-  const system = systemPrompt(tools, config.thinking, config.taskContract, input.systemHead, config.dateLine)
+  const system = systemPrompt(
+    tools,
+    config.thinking,
+    config.taskContract,
+    input.systemHead,
+    config.dateLine,
+    config.worklist?.systemGuidance === undefined ? undefined : { worklistGuidance: config.worklist.systemGuidance },
+  )
   let promptTokens = 0
   let completionTokens = 0
   let generations = 0
@@ -328,6 +352,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
     return { output: reconstructOutput(text, config.thinking), result: { ...result, text }, prompt }
   }
 
+  let worklistTrace: WorklistTrace | undefined
   const traced = (
     stage: 'decision' | 'answer' | 'card', prompt: string, output: string, result: GenerateResult, action: Action,
     outcome: string, gateRepairs: readonly string[] = [], relay?: RelayTrace,
@@ -338,6 +363,7 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
       repairs: [...parsed, ...gateRepairs],
       ...result.stop === undefined ? {} : { stop: result.stop },
       ...relay === undefined ? {} : { relay },
+      ...stage === 'decision' && worklistTrace !== undefined ? { worklist: worklistTrace } : {},
     })
   }
   const parseOptions = { strict: !config.outputRepairs }
@@ -386,7 +412,28 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
   // observation it is about to act on.
   let state = analyzeTurn(input.history)
   let base: Entry[]
-  if (config.relay === undefined) {
+  let liveWorklistNudge: string | undefined
+  if (config.worklist !== undefined) {
+    const { entries, fold } = worklistEntries(input.history, {
+      tools,
+      postToolReminder: reminder,
+      systemTokens: countTokens(system),
+      historyEmptyThink: config.historyEmptyThink,
+      ...config.worklist,
+    })
+    liveWorklistNudge = fold.nudge
+    worklistTrace = {
+      promptTokens: fold.promptTokens,
+      budgetTokens: config.worklist.budgetTokens,
+      ...(fold.checkpointAt === undefined ? {} : { checkpointAt: fold.checkpointAt }),
+      nudged: fold.nudge !== undefined,
+    }
+    state = analyzeTurn(input.history, { duplicateFrom: fold.duplicateFrom })
+    base = [
+      { role: 'system', text: system },
+      ...entries,
+    ]
+  } else if (config.relay === undefined) {
     base = [
       { role: 'system', text: system },
       ...transcriptEntries(input.history, { tools, postToolReminder: reminder }),
@@ -410,10 +457,16 @@ export async function decideStep(input: StepInput): Promise<StepResult> {
    * makes is run instead of being thrown away.
    */
   const answerStage = async (entries: readonly Entry[], prelude: readonly string[], allowTools = false): Promise<StepResult> => {
+    const trimmedEntries = liveWorklistNudge !== undefined
+      && entries.length > 0
+      && entries[entries.length - 1]!.role === 'user'
+      && entries[entries.length - 1]!.text === liveWorklistNudge
+      ? entries.slice(0, -1)
+      : entries
     const staged: Entry[] = [
       // The per-step "call another tool" reminder contradicts the closeout
       // ("tools are now unavailable"); drop it before the final instruction.
-      ...entries.filter(entry => !(entry.role === 'user' && entry.text === reminder)),
+      ...trimmedEntries.filter(entry => !(entry.role === 'user' && entry.text === reminder)),
       ...prelude.map(text => ({ role: 'user' as const, text })),
       { role: 'user', text: oneStageAnswerInstruction() },
     ]
@@ -565,6 +618,18 @@ function gateToolCall(
   }
   if (tool.name === state.consecutiveFailedTool && state.consecutiveFailures >= config.maxConsecutiveFailures) {
     const error = `tool "${tool.name}" blocked after ${state.consecutiveFailures} consecutive failures; choose a different tool or answer`
+    return {
+      type: 'rejected',
+      reason: 'blocked',
+      receipt: [
+        { role: 'assistant', text: recordToolCall(tool.name, args) },
+        { role: 'user', text: toolResponse(tool.name, false, error) },
+        { role: 'user', text: toolFailureReminder(tool.name, error, true, tools) },
+      ],
+    }
+  }
+  if (isWorklistTool(tool.dshName) && state.consecutiveWorklistCalls >= 2) {
+    const error = 'work list already updated twice in a row; execute a workspace tool call or answer directly'
     return {
       type: 'rejected',
       reason: 'blocked',

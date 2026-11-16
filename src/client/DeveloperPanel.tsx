@@ -14,10 +14,12 @@ export interface DeveloperSettings {
   traceDir: string
   outputRepairs: boolean
   guards: boolean
-  /** Experimental relay context; the switch edits `historyMode` in the Host schema. */
-  historyMode: 'full' | 'relay'
+  /** Context management mode; edits `historyMode` in the Host schema. */
+  historyMode: 'full' | 'relay' | 'worklist'
   relayBudgetTokens: number
   relayCardMaxTokens: number
+  worklistBudgetTokens: number
+  worklistKeepRecentPairs: number
 }
 
 export const DEVELOPER_DEFAULTS: DeveloperSettings = {
@@ -28,6 +30,8 @@ export const DEVELOPER_DEFAULTS: DeveloperSettings = {
   historyMode: 'full',
   relayBudgetTokens: 8000,
   relayCardMaxTokens: 768,
+  worklistBudgetTokens: 8000,
+  worklistKeepRecentPairs: 2,
 }
 
 function Toggle(props: { label: string; hint: string; checked: boolean; disabled: boolean; onChange: (value: boolean) => void }) {
@@ -228,12 +232,13 @@ function DirInput(props: { value: string; disabled: boolean; onSave: (value: str
  * A number the Host validates, so it is edited as text and written on blur or
  * Enter: a half-typed value would otherwise be saved and refused.
  */
-function NumberField(props: { value: number; onSave: (value: number) => void; disabled: boolean; placeholder?: string }) {
+function NumberField(props: { value: number; onSave: (value: number) => void; disabled: boolean; placeholder?: string; min?: number }) {
   const [text, setText] = useState(String(props.value))
   useEffect(() => setText(String(props.value)), [props.value])
+  const minVal = props.min ?? 1
   const commit = () => {
     const parsed = Number(text)
-    if (text.trim() === '' || !Number.isInteger(parsed) || parsed <= 0) {
+    if (text.trim() === '' || !Number.isInteger(parsed) || parsed < minVal) {
       setText(String(props.value))
       return
     }
@@ -269,17 +274,52 @@ export function DeveloperCard(props: {
           {settings.recordTraces ? '轨迹随会话保存' : '轨迹只在内存'}
           {settings.outputRepairs ? '' : ' · 修正已关'}
           {settings.guards ? '' : ' · 修复已关'}
-          {settings.historyMode === 'relay' ? ' · 接力上下文' : ''}
+          {settings.historyMode === 'relay'
+            ? ` · 接力上下文（${settings.relayBudgetTokens}）`
+            : settings.historyMode === 'worklist'
+              ? ` · 状态化工单（${settings.worklistBudgetTokens}）`
+              : ''}
         </span>
       </summary>
       <div className="rwkv-developer-body">
-        <Toggle
-          label="实验性上下文管理（接力）" checked={settings.historyMode === 'relay'} disabled={off}
-          onChange={value => { void set('historyMode', value ? 'relay' : 'full') }}
-          hint={settings.historyMode === 'relay'
-            ? '已开启：早先的对话段被模型自己写的交接卡替换，只有最近一次工具调用和结果原样保留。每一轮用户消息开始处切断，卡片写在会话记录旁边，可随会话恢复。'
-            : '关闭时模型读完整对话。开启后，超过预算的早期步骤被一段六段式交接卡替换，用来压缩上下文。这是实验特性，只影响模型能看到的历史，不改变工具与提示词。'}
-        />
+        <label className="rwkv-field">
+          <span className="rwkv-label">上下文管理模式</span>
+          <select
+            className="rwkv-input" value={settings.historyMode} disabled={off}
+            onChange={event => { void set('historyMode', event.target.value) }}
+          >
+            <option value="full">完整对话（full）</option>
+            <option value="worklist">状态化工单（worklist：todo_plan / todo_update）</option>
+            <option value="relay">轮级接力卡（relay）</option>
+          </select>
+          <p className="rwkv-hint">
+            {settings.historyMode === 'worklist'
+              ? '已开启状态化工单：模型通过 todo_plan 与 todo_update 维护子目标和阶段性 note；写入 note 后温和折叠早期输出（保留初始计划与最近几步工具结果），未建表时自动走兜底台账压缩，并同步渲染到桌面右侧 Todo 面板。'
+              : settings.historyMode === 'relay'
+                ? '已开启接力卡：早先的对话段被模型自己写的交接卡替换，只有最近一次工具调用和结果原样保留。'
+                : '默认读取完整对话，不挂载状态化工单工具，也不生成交接卡。'}
+          </p>
+        </label>
+        {settings.historyMode === 'worklist' ? (
+          <div className="rwkv-grid">
+            <label className="rwkv-field">
+              <span className="rwkv-label">工单预算水位（RWKV token）</span>
+              <NumberField
+                value={settings.worklistBudgetTokens} disabled={off} placeholder="8000"
+                onSave={value => { void set('worklistBudgetTokens', value) }}
+              />
+              <p className="rwkv-hint">提示词超过该水位时，在工具结果后追加不撤回的预算提醒（未建表提醒 todo_plan，已建表提醒 todo_update 写 note）；超出硬上限（+3000）自动将旧步压成行级台账。</p>
+            </label>
+            <label className="rwkv-field">
+              <span className="rwkv-label">折叠保留最近步数</span>
+              <NumberField
+                value={settings.worklistKeepRecentPairs} min={0} disabled={off} placeholder="2"
+                onSave={value => { void set('worklistKeepRecentPairs', value) }}
+              />
+              <p className="rwkv-hint">每次 todo_update 写入 note 折叠早期输出时，额外原样保留检查点前最近几步工作区工具调用与结果（默认 2），避免折叠后断片重读。</p>
+            </label>
+          </div>
+        ) : null}
         {settings.historyMode === 'relay' ? (
           <div className="rwkv-grid">
             <label className="rwkv-field">
