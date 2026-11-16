@@ -122,7 +122,7 @@ export const Config = z.object({
     .description('relay: exact RWKV token budget for the part of the leg that gets carded; the latest call/result pair is always kept.').volatile(),
   relayCardMaxTokens: z.natural().default(768)
     .description('relay: output cap of one handoff recap.').volatile(),
-  worklistBudgetTokens: z.natural().default(8000)
+  worklistBudgetTokens: z.natural().default(12000)
     .description('worklist: total RWKV prompt token budget before attaching a non-withdrawn budget reminder (`todo_plan` / `todo_update`).').volatile(),
   worklistKeepRecentPairs: z.natural().default(2)
     .description('worklist: recent workspace call/result pairs kept right before a noted `todo_update` checkpoint (gentle folding).').volatile(),

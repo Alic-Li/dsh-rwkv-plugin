@@ -15,9 +15,7 @@ export interface DeveloperSettings {
   outputRepairs: boolean
   guards: boolean
   /** Context management mode; edits `historyMode` in the Host schema. */
-  historyMode: 'full' | 'relay' | 'worklist'
-  relayBudgetTokens: number
-  relayCardMaxTokens: number
+  historyMode: 'full' | 'worklist'
   worklistBudgetTokens: number
   worklistKeepRecentPairs: number
 }
@@ -28,9 +26,7 @@ export const DEVELOPER_DEFAULTS: DeveloperSettings = {
   outputRepairs: true,
   guards: true,
   historyMode: 'full',
-  relayBudgetTokens: 8000,
-  relayCardMaxTokens: 768,
-  worklistBudgetTokens: 8000,
+  worklistBudgetTokens: 12000,
   worklistKeepRecentPairs: 2,
 }
 
@@ -266,6 +262,7 @@ export function DeveloperCard(props: {
     setBusy(false)
   }
   const off = disabled || busy
+  const historyMode = settings.historyMode === 'worklist' ? 'worklist' : 'full'
   return (
     <details className="rwkv-card rwkv-developer">
       <summary className="rwkv-head rwkv-developer-summary">
@@ -274,38 +271,31 @@ export function DeveloperCard(props: {
           {settings.recordTraces ? '轨迹随会话保存' : '轨迹只在内存'}
           {settings.outputRepairs ? '' : ' · 修正已关'}
           {settings.guards ? '' : ' · 修复已关'}
-          {settings.historyMode === 'relay'
-            ? ` · 接力上下文（${settings.relayBudgetTokens}）`
-            : settings.historyMode === 'worklist'
-              ? ` · 状态化工单（${settings.worklistBudgetTokens}）`
-              : ''}
+          {historyMode === 'worklist' ? ` · 状态化工单（${settings.worklistBudgetTokens}）` : ''}
         </span>
       </summary>
       <div className="rwkv-developer-body">
         <label className="rwkv-field">
           <span className="rwkv-label">上下文管理模式</span>
           <select
-            className="rwkv-input" value={settings.historyMode} disabled={off}
+            className="rwkv-input" value={historyMode} disabled={off}
             onChange={event => { void set('historyMode', event.target.value) }}
           >
-            <option value="full">完整对话（full）</option>
-            <option value="worklist">状态化工单（worklist：todo_plan / todo_update）</option>
-            <option value="relay">轮级接力卡（relay）</option>
+            <option value="full">完整对话 / Full</option>
+            <option value="worklist">状态化工单（实验性） / WorkList (Experimental)</option>
           </select>
           <p className="rwkv-hint">
-            {settings.historyMode === 'worklist'
+            {historyMode === 'worklist'
               ? '已开启状态化工单：模型通过 todo_plan 与 todo_update 维护子目标和阶段性 note；写入 note 后温和折叠早期输出（保留初始计划与最近几步工具结果），未建表时自动走兜底台账压缩，并同步渲染到桌面右侧 Todo 面板。'
-              : settings.historyMode === 'relay'
-                ? '已开启接力卡：早先的对话段被模型自己写的交接卡替换，只有最近一次工具调用和结果原样保留。'
-                : '默认读取完整对话，不挂载状态化工单工具，也不生成交接卡。'}
+              : '默认读取完整对话，不挂载状态化工单工具。'}
           </p>
         </label>
-        {settings.historyMode === 'worklist' ? (
+        {historyMode === 'worklist' ? (
           <div className="rwkv-grid">
             <label className="rwkv-field">
               <span className="rwkv-label">工单预算水位（RWKV token）</span>
               <NumberField
-                value={settings.worklistBudgetTokens} disabled={off} placeholder="8000"
+                value={settings.worklistBudgetTokens} disabled={off} placeholder="12000"
                 onSave={value => { void set('worklistBudgetTokens', value) }}
               />
               <p className="rwkv-hint">提示词超过该水位时，在工具结果后追加不撤回的预算提醒（未建表提醒 todo_plan，已建表提醒 todo_update 写 note）；超出硬上限（+3000）自动将旧步压成行级台账。</p>
@@ -317,26 +307,6 @@ export function DeveloperCard(props: {
                 onSave={value => { void set('worklistKeepRecentPairs', value) }}
               />
               <p className="rwkv-hint">每次 todo_update 写入 note 折叠早期输出时，额外原样保留检查点前最近几步工作区工具调用与结果（默认 2），避免折叠后断片重读。</p>
-            </label>
-          </div>
-        ) : null}
-        {settings.historyMode === 'relay' ? (
-          <div className="rwkv-grid">
-            <label className="rwkv-field">
-              <span className="rwkv-label">接力预算（token）</span>
-              <NumberField
-                value={settings.relayBudgetTokens} disabled={off} placeholder="8000"
-                onSave={value => { void set('relayBudgetTokens', value) }}
-              />
-              <p className="rwkv-hint">一段对话超过这个估算预算就写卡。最近一次工具调用和它的结果始终原样保留，不参与估算。</p>
-            </label>
-            <label className="rwkv-field">
-              <span className="rwkv-label">单张卡上限（token）</span>
-              <NumberField
-                value={settings.relayCardMaxTokens} disabled={off} placeholder="768"
-                onSave={value => { void set('relayCardMaxTokens', value) }}
-              />
-              <p className="rwkv-hint">写卡请求的输出上限，思考也算在里面。太小会让卡写不完而退回自动生成的摘要。</p>
             </label>
           </div>
         ) : null}

@@ -437,13 +437,22 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
   }
   return (
     <div className="rwkv-editor">
-      <Field label="思考">
-        <Segment
-          value={draft.thinking} disabled={disabled}
-          options={[['full', '开启'], ['off', '关闭']] as const}
-          onChange={value => update({ thinking: value })}
-        />
-      </Field>
+      <div className="rwkv-grid">
+        <Field label="思考">
+          <Segment
+            value={draft.thinking} disabled={disabled}
+            options={[['full', '开启'], ['off', '关闭']] as const}
+            onChange={value => update({ thinking: value })}
+          />
+        </Field>
+        <Field label="历史步骤思考" hint="默认保留完整思维链；留空仅用于兼容旧版空思考训练权重">
+          <Segment
+            value={draft.historyEmptyThink ? 'empty' : 'keep'} disabled={disabled}
+            options={[['keep', '保留'], ['empty', '留空']] as const}
+            onChange={value => update({ historyEmptyThink: value === 'empty' })}
+          />
+        </Field>
+      </div>
       <div className="rwkv-grid3">
         <Field label="每轮最多工具步数">{num('maxSteps')}</Field>
         <Field label="同一工具连续失败上限">{num('maxConsecutiveFailures')}</Field>
@@ -452,7 +461,6 @@ function RunEditor(props: { initial: RunSettings; disabled: boolean; onCancel: (
         <Field label="作答 max tokens">{num('answerMaxTokens')}</Field>
       </div>
       <div className="rwkv-checks">
-        <Check label="历史步骤不带思考（兼容旧版空思考训练权重；默认关闭以保留历史思维链）" checked={draft.historyEmptyThink} disabled={disabled} onChange={value => update({ historyEmptyThink: value })} />
         <Check label="复读时截断生成" checked={draft.loopGuard} disabled={disabled} onChange={value => update({ loopGuard: value })} />
         <Check label="系统提示词末尾写当前日期和时区" checked={draft.currentDate} disabled={disabled} onChange={value => update({ currentDate: value })} />
       </div>

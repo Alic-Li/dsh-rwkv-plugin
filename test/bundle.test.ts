@@ -35,11 +35,11 @@ test('bundle: the RWKV preset mounts the stateful worklist plugin and exports ./
   assert.equal(manifest.exports?.['./todo'], './lib/todo.js')
 })
 
-// Relay and worklist context are experimental: they must be reachable from the settings page
+// Worklist context is experimental: it must be reachable from the settings page
 // without editing a profile, and the Host must accept a save while running
 // (volatile). Both halves are checked here because a wired switch over a
 // non-volatile field would look right and silently apply only after a restart.
-test('bundle: the developer panel switches relay and worklist context on live fields', () => {
+test('bundle: the developer panel switches worklist context on live fields', () => {
   const schema = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
   const historyMode = schema.slice(schema.indexOf('historyMode: z.union'))
   assert.ok(historyMode.slice(0, 500).includes('.volatile()'), 'historyMode must be volatile, or the switch needs a reload')
@@ -49,12 +49,8 @@ test('bundle: the developer panel switches relay and worklist context on live fi
   assert.ok(worklistKeep.slice(0, 300).includes('.volatile()'), 'worklistKeepRecentPairs must be volatile')
   const panel = readFileSync(new URL('../src/client/DeveloperPanel.tsx', import.meta.url), 'utf8')
   assert.ok(panel.includes("set('historyMode'"), 'the panel writes historyMode')
-  assert.ok(panel.includes("set('relayBudgetTokens'"), 'the panel writes the relay budget')
-  assert.ok(panel.includes("set('relayCardMaxTokens'"), 'the panel writes the card output cap')
   assert.ok(panel.includes("set('worklistBudgetTokens'"), 'the panel writes the worklist budget')
   assert.ok(panel.includes("set('worklistKeepRecentPairs'"), 'the panel writes worklistKeepRecentPairs')
-  assert.ok(panel.includes('relayBudgetTokens: 8000'))
-  assert.ok(panel.includes('relayCardMaxTokens: 768'))
-  assert.ok(panel.includes('worklistBudgetTokens: 8000'))
+  assert.ok(panel.includes('worklistBudgetTokens: 12000'))
   assert.ok(panel.includes('worklistKeepRecentPairs: 2'))
 })

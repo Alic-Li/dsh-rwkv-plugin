@@ -51,7 +51,7 @@ export interface WorklistOptions {
   /**
    * Total RWKV token budget (system prompt + folded history + step reminders)
    * before nudging the model to checkpoint established facts into `todo_update`.
-   * Default: 8000.
+   * Default: 12000.
    */
   readonly budgetTokens: number
   /**
@@ -78,7 +78,7 @@ export interface WorklistOptions {
   readonly systemGuidance?: boolean
 }
 
-export const DEFAULT_WORKLIST_BUDGET_TOKENS = 8000
+export const DEFAULT_WORKLIST_BUDGET_TOKENS = 12000
 export const DEFAULT_WORKLIST_HARD_SLACK_TOKENS = 3000
 export const DEFAULT_BACKBONE_MAX_TOKENS = 5000
 export const DEFAULT_KEEP_RECENT_PAIRS = 2
